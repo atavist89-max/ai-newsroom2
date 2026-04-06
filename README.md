@@ -142,6 +142,7 @@ https://github.com/atavist89-max/Ai-newsroom
 ## Changelog
 
 ### Latest Updates
+- Removed non-functional download button
 - Added "Crime" topic
 - Changed sentence length requirement to statistical distribution (60% between 15-30 words)
 - Added continent-specific angle requirements
