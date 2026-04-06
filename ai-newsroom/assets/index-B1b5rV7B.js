@@ -179,6 +179,7 @@ Score each translated story 1-10 using BBC news values:
 **STORY COMPLETENESS REQUIREMENTS - ALL MANDATORY, NO EXCEPTIONS:**
 
 - **MANDATORY MINIMUM LENGTH**: Each story MUST be AT LEAST 1500 characters. Stories under 1500 chars are INCOMPLETE and must be expanded.
+- **MANDATORY SENTENCE LENGTH**: Sentences must be between 15-30 words. Too short (<15) sounds choppy. Too long (>30) is hard to follow.
 - **MANDATORY INTERNATIONAL CONTEXT**: Each story MUST include comprehensive background for listeners unfamiliar with local politics/culture. NO ASSUMPTIONS of prior knowledge.
 - **MANDATORY TERM DEFINITIONS**: ALL local terms, acronyms, organizations, and political concepts MUST be defined on first mention. NO UNDEFINED TERMS allowed.
 - **MANDATORY 5 Ws + How**: EVERY story MUST answer Who, What, When, Where, Why, and How. Missing any = INCOMPLETE.
@@ -235,6 +236,7 @@ Score each translated story 1-10 using BBC news values:
 **EDITOR COMPLETENESS AUDIT - REJECT IF ANY REQUIREMENT FAILS:**
 
 - **REJECT IF UNDER 1500 CHARS**: Any story under 1500 characters is AUTOMATICALLY REJECTED. Return to Writer for mandatory expansion.
+- **REJECT IF SENTENCE <15 OR >30 WORDS**: Sentences outside 15-30 word range = REJECT. Too short sounds choppy, too long is hard to follow.
 - **REJECT IF INTERNATIONAL LISTENER WOULD GOOGLE**: If a listener from another continent wouldn't understand without searching, REJECT.
 - **REJECT IF ANY UNDEFINED TERMS**: Every local reference, term, acronym, organization MUST be defined. Missing any = REJECT.
 - **REJECT IF MISSING 5 Ws + HOW**: Who, What, When, Where, Why, How must ALL be answered. Missing any = REJECT.
@@ -539,6 +541,8 @@ final_audio.export("/mnt/okcomputer/output/${g.name.replace(/\s+/g,"_")}_${D.lab
 6. **Agent 2** (Editor - FINAL CHECK) → **MUST VERIFY ALL REQUIREMENTS BEFORE AUDIO - ALL MANDATORY, NO EXCEPTIONS:**
 
    **REJECT IF UNDER 1500 CHARS**: Any story under 1500 characters is AUTOMATICALLY REJECTED. Return to Writer for mandatory expansion.
+   
+   **REJECT IF SENTENCE <15 OR >30 WORDS**: Sentences outside 15-30 word range = REJECT. Too short sounds choppy, too long is hard to follow.
    
    **REJECT IF INTERNATIONAL LISTENER WOULD GOOGLE**: If a listener from another continent wouldn't understand without searching, REJECT.
    
