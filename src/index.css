@@ -61,3 +61,45 @@
   background: hsl(var(--primary) / 0.3);
   color: hsl(var(--foreground));
 }
+
+/* Leaflet Map Customizations */
+#world-map {
+  z-index: 1;
+}
+
+.leaflet-container {
+  background: #1e293b;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.leaflet-popup-content-wrapper {
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 0;
+}
+
+.leaflet-popup-content {
+  margin: 8px 12px;
+  line-height: 1.4;
+}
+
+.leaflet-popup-tip {
+  background: #1e293b;
+  border: 1px solid #334155;
+}
+
+.leaflet-control-attribution {
+  background: rgba(30, 41, 59, 0.8) !important;
+  color: #64748b !important;
+}
+
+.leaflet-control-attribution a {
+  color: #94a3b8 !important;
+}
+
+.custom-marker {
+  background: transparent;
+  border: none;
+}

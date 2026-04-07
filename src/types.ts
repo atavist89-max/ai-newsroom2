@@ -50,6 +50,7 @@ export interface MusicStyle {
 }
 
 export interface MusicSuite {
+  name?: string;
   intro: MusicStyle;
   outro: MusicStyle;
   storySting: MusicStyle;
