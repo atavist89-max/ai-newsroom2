@@ -2096,11 +2096,15 @@ Generate all audio and assemble into final MP3."""
                     return
             
             # ============================================================
-            # WRITER <-> EDITOR LOOP (max 3 attempts)
+            # WRITER <-> EDITOR LOOP (max 3 attempts, then continue with warning)
             # ============================================================
             approved = False
-            while not approved and session.writer_editor_loop_count < max_loops:
-                session.writer_editor_loop_count += 1
+            editor_attempts = 0
+            max_editor_attempts = 3
+            
+            while not approved and editor_attempts < max_editor_attempts:
+                editor_attempts += 1
+                session.writer_editor_loop_count += 1  # Track total for logging
                 
                 # ============================================================
                 # STEP 3: EDITOR - Evaluate and create evaluation.json
@@ -2111,22 +2115,27 @@ Generate all audio and assemble into final MP3."""
                     session.editor_evaluation_passed = True
                     save_session(session)
                 else:
-                    # REJECTED - Send back to Writer for corrections (NO re-selection!)
-                    if session.writer_editor_loop_count < max_loops:
-                        print(f"[Workflow] Editor REJECTED - sending back to Writer (loop {session.writer_editor_loop_count}/{max_loops})")
+                    # REJECTED - Send back to Writer for corrections
+                    if editor_attempts < max_editor_attempts:
+                        print(f"[Workflow] Editor REJECTED - sending back to Writer (attempt {editor_attempts}/{max_editor_attempts})")
                         await self._run_writer_correction(session, config)
                         if self._stop_event.is_set() or session.state == WorkflowState.ERROR:
                             return
                         continue  # Back to Editor evaluation
                     else:
-                        # Max loops reached without approval
-                        error_msg = f"Editor rejected after {max_loops} Writer correction attempts"
-                        print(f"[Workflow] {error_msg}")
-                        session.state = WorkflowState.ERROR
-                        session.error = error_msg
+                        # Max editor attempts reached - log warning but CONTINUE to Fact Checker
+                        warning_msg = f"Editor still has concerns after {max_editor_attempts} attempts, but proceeding to Fact Checker anyway"
+                        print(f"[Workflow] WARNING: {warning_msg}")
+                        await self._emit_and_log(
+                            session,
+                            "agent_warning",
+                            {"session_id": session_id, "warning": warning_msg},
+                            agent="system",
+                            message=f"⚠️ {warning_msg}"
+                        )
+                        # Don't stop - continue to Fact Checker
+                        session.editor_evaluation_passed = True  # Force pass to continue
                         save_session(session)
-                        await self.emit("workflow_error", {"session_id": session_id, "error": error_msg})
-                        return
                 
                 # ============================================================
                 # STEP 4: FACT CHECKER - Verify facts (only if Editor passed)
@@ -2167,10 +2176,29 @@ Generate all audio and assemble into final MP3."""
                         if self._stop_event.is_set() or session.state == WorkflowState.ERROR:
                             return
                         
-                        # Reset and re-evaluate
+                        # Reset for re-evaluation (but use a separate fact-check counter)
                         session.editor_evaluation_passed = False
                         session.fact_check_json = None
                         save_session(session)
+                        
+                        # Check if we've tried too many fact-check corrections
+                        if session.fact_check_correction_count >= 2:  # Max 2 fact-check correction loops
+                            warning_msg = f"Fact-check corrections exceeded limit ({session.fact_check_correction_count}), proceeding anyway"
+                            print(f"[Workflow] WARNING: {warning_msg}")
+                            await self._emit_and_log(
+                                session,
+                                "agent_warning",
+                                {"session_id": session_id, "warning": warning_msg},
+                                agent="system",
+                                message=f"⚠️ {warning_msg}"
+                            )
+                            session.fact_check_all_passed = True  # Force pass to continue
+                            session.editor_evaluation_passed = True
+                            save_session(session)
+                            approved = True
+                            break
+                        
+                        session.fact_check_correction_count += 1
                         continue  # Back to Editor evaluation
                     
                     # PRIORITY 2: Handle FAILED stories (Severe issues - Replacement needed)
@@ -2216,19 +2244,17 @@ Generate all audio and assemble into final MP3."""
                 approved = True
             
             if not approved:
-                error_msg = f"Could not get approval after {max_loops} attempts"
-                print(f"[Workflow] {error_msg}")
-                session.state = WorkflowState.ERROR
-                session.error = error_msg
-                save_session(session)
+                # Instead of stopping, log a warning and continue to audio production
+                warning_msg = f"Script had issues after multiple correction attempts, but proceeding to audio production anyway"
+                print(f"[Workflow] WARNING: {warning_msg}")
                 await self._emit_and_log(
                     session,
-                    "workflow_error",
-                    {"session_id": session_id, "error": error_msg},
+                    "agent_warning",
+                    {"session_id": session_id, "warning": warning_msg},
                     agent="system",
-                    message=f"❌ Max iterations reached: Could not get approval after {max_loops} attempts"
+                    message=f"⚠️ {warning_msg}"
                 )
-                return
+                # Continue to audio production instead of returning
             
             # ============================================================
             # STEP 7: AUDIO PRODUCER - Generate MP3

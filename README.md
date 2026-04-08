@@ -21,7 +21,8 @@ The AI Newsroom uses a sophisticated **7-agent execution workflow** powered by A
 
 - **Real News, Real Time**: Agents use web search to find actual news from real sources
 - **Strict Editorial Process**: Two-phase editor review with 11 hard requirements
-- **Rejection Loops**: Failed scripts automatically return for revision (up to 3 attempts)
+- **Rejection Loops**: Failed scripts automatically return for revision (up to 3 attempts per phase)
+- **Never-Stopping Workflow**: After max attempts, continues with warnings instead of stopping - ensures MP3 is always produced
 - **Human-in-the-Loop**: Review gates for story selection and fact-check failures
 - **Agent Log**: Full visibility into agent activity, artifacts, and raw LLM outputs
 - **Tool System**: Each agent has specialized tools for search, file I/O, and validation
@@ -51,7 +52,7 @@ STEP 2: EDITOR - PHASE 1 (Agent 2)
 ├── ❌ REJECTED ──────────────────────────┐
 │   ├── Increment attempt counter          │
 │   └── LOOP BACK to Step 1 (Researcher)  │
-│   (Max 3 attempts)                       │
+│   (Max 3 attempts, then continue)        │
 │◀─────────────────────────────────────────┘
 │
 └── ✅ APPROVED
@@ -99,7 +100,7 @@ STEP 6: EDITOR - FINAL CHECK (Agent 2 - Same Editor)
 │   ├── Show WHICH requirements failed                    │
 │   ├── LOOP: Writer → Fact Checker → Editor             │
 │   │   (Recovery Researcher if needed)                  │
-│   └── Repeat until ALL 11 pass (Max 3 attempts)        │
+│   └── Repeat until ALL 11 pass (Max 3, then warn)      │
 │◀────────────────────────────────────────────────────────┘
 │
 └── ✅ ALL 11 REQUIREMENTS PASSED
@@ -539,7 +540,7 @@ curl -X POST http://localhost:8000/workflow/start \
 **"Editor Final Check Failed - X requirements"**
 - Check Agent Activity Log for which requirements failed
 - System will auto-loop to Writer for fixes
-- Max 3 attempts before workflow error
+- After max attempts, continues with warning (workflow never stops)
 
 **"No file to download"**
 - Audio Producer creates placeholder MP3
@@ -554,7 +555,14 @@ curl -X POST http://localhost:8000/workflow/start \
 
 ## Changelog
 
-### v2.2 - Fact Checker Logic Improvement (Current)
+### v2.3 - Never-Stopping Workflow (Current)
+- **Fixed**: Workflow no longer stops after max iteration attempts
+- **New**: After 3 Editor attempts or 2 Fact-Check corrections, continues with warnings
+- **New**: Separate counters for Editor attempts vs Fact-Check correction loops
+- **New**: `agent_warning` events emitted instead of `workflow_error` for iteration limits
+- **Guarantee**: MP3 is always produced, even with imperfect scripts
+
+### v2.2 - Fact Checker Logic Improvement
 - **Fixed**: Fact checker now properly distinguishes between correctable vs severe issues
 - **New**: Stories with minor errors go to Writer for correction (with supplemental sources)
 - **New**: Replacement only triggered for severe issues (hallucination, wrong topic, too old)

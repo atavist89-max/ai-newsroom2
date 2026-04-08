@@ -129,6 +129,10 @@ class WorkflowSession(BaseModel):
     writer_editor_loop_count: int = 0
     max_writer_editor_loops: int = 3
     
+    # Fact-check correction loop tracking (separate counter for fact-check corrections)
+    fact_check_correction_count: int = 0
+    max_fact_check_corrections: int = 2
+    
     # Final approved script
     final_script: Optional[str] = None
     
