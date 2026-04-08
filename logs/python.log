@@ -1,0 +1,10 @@
+Server initialized for asgi.
+INFO:     Started server process [48897]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+[Server] Starting on 0.0.0.0:8000
+[Server] Starting AI Newsroom Python Server...
+[Server] Workflow orchestrator initialized
+INFO:     127.0.0.1:44320 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33910 - "GET /health HTTP/1.1" 200 OK

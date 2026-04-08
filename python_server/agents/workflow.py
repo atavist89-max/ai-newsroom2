@@ -1566,37 +1566,82 @@ Mark as FAILED if any core fact cannot be verified."""
             print(f"[Workflow] Error in fact checker: {e}")
             await self._agent_error(session, "fact_checker", str(e))
     
-    def _get_failed_stories_from_fact_check(self, session: WorkflowSession) -> List[Dict]:
-        """Extract failed stories from fact_check.json."""
+    def _get_stories_by_grade(self, session: WorkflowSession) -> tuple[List[Dict], List[Dict]]:
+        """Extract stories by grade from fact_check.json.
+        
+        Returns:
+            tuple: (partially_correct_stories, failed_stories)
+            - partially_correct: Writer can fix with supplemental sources
+            - failed: Severe issues requiring replacement (hallucination, wrong topic, too old)
+        """
+        partially_correct = []
         failed = []
         if session.fact_check_json:
             for story in session.fact_check_json.get("stories", []):
                 grade = story.get("grade", "")
-                if "FAILED" in grade:
-                    failed.append(story)
+                action = story.get("action", "")
+                
+                # PARTIALLY CORRECT: Writer can fix
+                if "PARTIALLY" in grade or action == "WRITER_CORRECT":
+                    partially_correct.append(story)
+                # FAILED: Only severe issues trigger replacement
+                elif "FAILED" in grade or action == "REPLACE_STORY":
+                    # Only replace for severe issues (hallucination, wrong topic, too old)
+                    severe_issues = story.get("severe_issues", [])
+                    if severe_issues:
+                        failed.append(story)
+                    else:
+                        # If no severe issues specified, treat as partially correct
+                        partially_correct.append(story)
+        
+        return partially_correct, failed
+    
+    def _get_failed_stories_from_fact_check(self, session: WorkflowSession) -> List[Dict]:
+        """DEPRECATED: Use _get_stories_by_grade instead.
+        
+        Extract failed stories from fact_check.json.
+        """
+        _, failed = self._get_stories_by_grade(session)
         return failed
     
     async def _run_researcher_fixes(self, session: WorkflowSession, config: Dict[str, Any], failed_stories: List[Dict]):
-        """Researcher finds replacement stories ONLY for failed fact-checks.
+        """Researcher finds replacement stories ONLY for severely failed fact-checks.
         
-        Keeps existing stories, only replaces the failed ones.
+        Replacement is the LAST resort for:
+        - Hallucinated stories (completely fabricated)
+        - Wrong topic (not related to selected topics)
+        - Wrong timeframe (too old)
+        - Multiple unverifiable core claims
+        
+        For minor issues, Writer should correct using supplemental sources.
         """
-        await self._agent_started(session, "news_researcher", f"Finding replacements for {len(failed_stories)} failed stories")
+        # Build detailed reason with justification
+        failed = failed_stories[0]
+        severe_issues = failed.get("severe_issues", [])
+        headline = failed.get("headline", "Unknown")
+        
+        if severe_issues:
+            reason = f"SEVERE FACT CHECK FAILURE - Replacement required:\n" + "\n".join(f"  - {issue}" for issue in severe_issues)
+        else:
+            reason = "SEVERE FACT CHECK FAILURE - Story requires replacement (hallucination or fundamentally incorrect)"
+        
+        await self._agent_started(session, "news_researcher", f"Finding replacement for failed story (last resort)")
         
         try:
             # Mark the first failed story for replacement
-            # (The recovery phase will handle one at a time)
             if failed_stories:
-                failed = failed_stories[0]
                 session.failed_story = FailedStory(
                     storyId=str(failed.get("story_id", "unknown")),
-                    headline=failed.get("headline", "Unknown"),
-                    reason="Fact check failed"
+                    headline=headline,
+                    reason=reason
                 )
                 session.state = WorkflowState.AWAITING_REPLACEMENT
                 save_session(session)
                 
-                await self._agent_working(session, "news_researcher", f"Finding replacement for: {failed.get('headline', 'Unknown')[:50]}...", 50)
+                print(f"[Workflow] REPLACEMENT REQUIRED for: {headline}")
+                print(f"[Workflow] Justification: {reason}")
+                
+                await self._agent_working(session, "news_researcher", f"Severe issues found - finding replacement for: {headline[:50]}...", 50)
                 
                 # Find alternatives
                 await self._run_recovery_phase(session, config)
@@ -1967,15 +2012,49 @@ Generate all audio and assemble into final MP3."""
                     return
                 
                 # ============================================================
-                # STEP 5: Handle Fact Check Failures (IF ANY)
+                # STEP 5: Handle Fact Check Issues (IF ANY)
                 # ============================================================
                 if not session.fact_check_all_passed:
-                    failed_stories = self._get_failed_stories_from_fact_check(session)
+                    partially_correct, failed_stories = self._get_stories_by_grade(session)
                     
-                    if failed_stories:
-                        print(f"[Workflow] Fact check found {len(failed_stories)} failed stories")
+                    # PRIORITY 1: Handle PARTIALLY CORRECT stories (Writer can fix)
+                    if partially_correct:
+                        print(f"[Workflow] Fact check found {len(partially_correct)} partially correct stories - sending to Writer for correction")
                         
-                        # Send to Researcher for replacements (ONLY for failed stories)
+                        # Build correction guidance from fact check
+                        correction_guidance = []
+                        for story in partially_correct:
+                            headline = story.get("headline", "Unknown")
+                            issues = story.get("correctable_issues", story.get("unverified_claims", []))
+                            guidance = story.get("correction_guidance", "")
+                            correction_guidance.append(f"Story: {headline}\nIssues: {', '.join(issues)}\nGuidance: {guidance}")
+                        
+                        # Update evaluation_json with fact check guidance
+                        session.editor_evaluation_json = {
+                            "decision": "REJECTED",
+                            "phase": "FACT_CHECK_CORRECTION",
+                            "reason": "Fact check found correctable issues",
+                            "correction_guidance": "\n\n".join(correction_guidance),
+                            "fact_check_issues": partially_correct
+                        }
+                        
+                        # Send to Writer for correction
+                        await self._run_writer_correction(session, config)
+                        if self._stop_event.is_set() or session.state == WorkflowState.ERROR:
+                            return
+                        
+                        # Reset and re-evaluate
+                        session.editor_evaluation_passed = False
+                        session.fact_check_json = None
+                        save_session(session)
+                        continue  # Back to Editor evaluation
+                    
+                    # PRIORITY 2: Handle FAILED stories (Severe issues - Replacement needed)
+                    if failed_stories:
+                        print(f"[Workflow] Fact check found {len(failed_stories)} FAILED stories requiring replacement")
+                        print(f"[Workflow] Severe issues detected: {[s.get('severe_issues', []) for s in failed_stories]}")
+                        
+                        # Send to Researcher for replacements (ONLY for severely failed stories)
                         await self._run_researcher_fixes(session, config, failed_stories)
                         if self._stop_event.is_set() or session.state == WorkflowState.ERROR:
                             return
@@ -1987,7 +2066,8 @@ Generate all audio and assemble into final MP3."""
                                 "reason": "awaiting_replacement",
                                 "data": {
                                     "failedStory": session.failed_story.model_dump() if session.failed_story else None,
-                                    "alternatives": [s.model_dump() for s in session.replacement_options] if session.replacement_options else []
+                                    "alternatives": [s.model_dump() for s in session.replacement_options] if session.replacement_options else [],
+                                    "justification": failed_stories[0].get("severe_issues", ["Severe fact check failure"])
                                 }
                             })
                             return
