@@ -7,30 +7,42 @@ import {
   ReplacementSelection 
 } from '../types/podcast';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+// API URLs - use relative URLs (Vite proxy handles routing in dev)
+const NODE_API_URL = '';
+const PYTHON_API_URL = '';
+const PYTHON_WS_URL = '';  // Will construct WebSocket URL based on window.location
 
 export class AutogenAPI {
-  private baseUrl: string;
+  private nodeUrl: string;
+  private pythonUrl: string;
+  private wsUrl: string;
+  private ws: WebSocket | null = null;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
 
   constructor() {
-    this.baseUrl = API_BASE_URL;
+    this.nodeUrl = NODE_API_URL;
+    this.pythonUrl = PYTHON_API_URL;
+    this.wsUrl = PYTHON_WS_URL;
   }
 
   async checkHealth(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.baseUrl}/api/health`);
-      return response.ok;
+      // Check Node.js server
+      const nodeResponse = await fetch(`${this.nodeUrl}/api/health`);
+      // Check Python server
+      const pythonResponse = await fetch(`${this.pythonUrl}/health`);
+      return nodeResponse.ok && pythonResponse.ok;
     } catch (error) {
       return false;
     }
   }
 
   /**
-   * Start a new podcast generation workflow
-   * Returns immediately with a sessionId for polling
+   * Start a new podcast generation workflow using the Python server
    */
   async startGeneration(config: PodcastConfig): Promise<{ sessionId: string; status: string }> {
-    const response = await fetch(`${this.baseUrl}/api/generate-podcast/start`, {
+    const response = await fetch(`${this.pythonUrl}/workflow/start`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -40,21 +52,21 @@ export class AutogenAPI {
 
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(error.error || 'Failed to start generation');
+      throw new Error(error.detail || 'Failed to start generation');
     }
 
     return response.json();
   }
 
   /**
-   * Get the current status of a workflow
+   * Get the current status of a workflow from Python server
    */
   async getWorkflowStatus(sessionId: string): Promise<WorkflowStatus> {
-    const response = await fetch(`${this.baseUrl}/api/workflow/${sessionId}/status`);
+    const response = await fetch(`${this.pythonUrl}/workflow/${sessionId}/status`);
     
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(error.error || 'Failed to get workflow status');
+      throw new Error(error.detail || 'Failed to get workflow status');
     }
 
     return response.json();
@@ -64,7 +76,7 @@ export class AutogenAPI {
    * Submit story selection to resume workflow
    */
   async submitStorySelection(sessionId: string, selection: StorySelection): Promise<{ success: boolean; message: string }> {
-    const response = await fetch(`${this.baseUrl}/api/workflow/${sessionId}/select-stories`, {
+    const response = await fetch(`${this.pythonUrl}/workflow/${sessionId}/select`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -74,7 +86,7 @@ export class AutogenAPI {
 
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(error.error || 'Failed to submit story selection');
+      throw new Error(error.detail || 'Failed to submit story selection');
     }
 
     return response.json();
@@ -84,7 +96,7 @@ export class AutogenAPI {
    * Submit replacement selection to resume workflow
    */
   async submitReplacementSelection(sessionId: string, selection: ReplacementSelection): Promise<{ success: boolean; message: string }> {
-    const response = await fetch(`${this.baseUrl}/api/workflow/${sessionId}/select-replacement`, {
+    const response = await fetch(`${this.pythonUrl}/workflow/${sessionId}/replace`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -94,10 +106,94 @@ export class AutogenAPI {
 
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(error.error || 'Failed to submit replacement selection');
+      throw new Error(error.detail || 'Failed to submit replacement selection');
     }
 
     return response.json();
+  }
+
+  /**
+   * Connect to WebSocket for real-time updates
+   */
+  connectWebSocket(
+    sessionId: string,
+    onMessage: (type: string, data: unknown) => void,
+    onConnect?: () => void,
+    onDisconnect?: () => void
+  ): () => void {
+    const connect = () => {
+      try {
+        // Construct WebSocket URL based on current window location
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = this.wsUrl || `${protocol}//${window.location.host}`;
+        this.ws = new WebSocket(`${wsUrl}/socket.io/?EIO=4&transport=websocket`);
+        
+        this.ws.onopen = () => {
+          console.log('[WebSocket] Connected');
+          this.reconnectAttempts = 0;
+          onConnect?.();
+        };
+
+        this.ws.onmessage = (event) => {
+          this.handleWebSocketMessage(event.data, onMessage, sessionId);
+        };
+
+        this.ws.onerror = (error) => {
+          console.error('[WebSocket] Error:', error);
+        };
+
+        this.ws.onclose = () => {
+          console.log('[WebSocket] Closed');
+          onDisconnect?.();
+          
+          // Attempt to reconnect
+          if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            setTimeout(() => {
+              console.log(`[WebSocket] Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+              connect();
+            }, 3000 * this.reconnectAttempts);
+          }
+        };
+      } catch (error) {
+        console.error('[WebSocket] Connection error:', error);
+      }
+    };
+
+    connect();
+
+    // Return disconnect function
+    return () => {
+      this.ws?.close();
+      this.ws = null;
+    };
+  }
+
+  private handleWebSocketMessage(
+    data: string, 
+    onMessage: (type: string, data: unknown) => void,
+    sessionId: string
+  ) {
+    // Handle Socket.IO protocol
+    if (data.startsWith('0')) {
+      // Handshake response, send ping
+      this.ws?.send('40');
+    } else if (data.startsWith('40')) {
+      // Connected, join session room
+      this.ws?.send(`420["join_session",{"session_id":"${sessionId}"}]`);
+    } else if (data.startsWith('42')) {
+      // Event message
+      const match = data.match(/42\["([^"]+)",(.*)\]/);
+      if (match) {
+        const [, eventName, eventData] = match;
+        try {
+          const parsedData = JSON.parse(eventData);
+          onMessage(eventName, parsedData);
+        } catch {
+          onMessage(eventName, eventData);
+        }
+      }
+    }
   }
 
   /**
@@ -155,7 +251,7 @@ export class AutogenAPI {
 
   /**
    * Legacy method for backward compatibility - starts and runs full workflow
-   * Note: This does NOT support human-in-the-loop and will fail if human input is required
+   * Uses Node.js backend for synchronous execution
    */
   async generatePodcast(config: PodcastConfig, onStatusUpdate?: (status: GenerationStatus) => void): Promise<APIResponse> {
     if (onStatusUpdate) {
@@ -167,7 +263,7 @@ export class AutogenAPI {
     }
 
     try {
-      const response = await fetch(`${this.baseUrl}/api/generate-podcast`, {
+      const response = await fetch(`${this.nodeUrl}/api/generate-podcast`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -217,13 +313,14 @@ export class AutogenAPI {
   }
 
   /**
-   * New method that supports human-in-the-loop workflow
+   * New method that supports human-in-the-loop workflow with real-time updates
    */
   async generatePodcastWithHumanInTheLoop(
     config: PodcastConfig,
     onStatusUpdate?: (status: GenerationStatus) => void,
     onAwaitingSelection?: (sessionId: string, researchOutput: { localStories: any[]; continentStories: any[] }) => void,
-    onAwaitingReplacement?: (sessionId: string, failedStory: any, alternatives: any[]) => void
+    onAwaitingReplacement?: (sessionId: string, failedStory: any, alternatives: any[]) => void,
+    useWebSocket: boolean = true
   ): Promise<APIResponse> {
     try {
       // Step 1: Start the workflow
@@ -237,58 +334,90 @@ export class AutogenAPI {
 
       const { sessionId } = await this.startGeneration(config);
 
-      // Step 2: Poll for status
+      // Step 2: Connect WebSocket for real-time updates
+      let disconnectWebSocket: (() => void) | null = null;
+      
+      if (useWebSocket) {
+        disconnectWebSocket = this.connectWebSocket(
+          sessionId,
+          (type, data) => {
+            // Handle WebSocket events
+            switch (type) {
+              case 'agent_started':
+              case 'agent_working':
+                if (onStatusUpdate) {
+                  onStatusUpdate({
+                    status: 'researching',
+                    progress: (data as { progress?: number }).progress || 0,
+                    currentStep: (data as { task?: string; message?: string }).task || 
+                                 (data as { task?: string; message?: string }).message || 
+                                 'Working...'
+                  });
+                }
+                break;
+              
+              case 'workflow_paused':
+                const pauseData = data as { reason: string; data: any };
+                if (pauseData.reason === 'awaiting_selection' && onAwaitingSelection) {
+                  onAwaitingSelection(sessionId, pauseData.data);
+                } else if (pauseData.reason === 'awaiting_replacement' && onAwaitingReplacement) {
+                  onAwaitingReplacement(sessionId, pauseData.data.failedStory, pauseData.data.alternatives);
+                }
+                break;
+              
+              case 'workflow_completed':
+                const completeData = data as { mp3_url?: string; filename?: string };
+                if (onStatusUpdate) {
+                  onStatusUpdate({
+                    status: 'completed',
+                    progress: 100,
+                    currentStep: 'Podcast complete!',
+                    mp3Url: completeData.mp3_url,
+                    filename: completeData.filename
+                  });
+                }
+                break;
+              
+              case 'workflow_error':
+                const errorData = data as { error: string };
+                if (onStatusUpdate) {
+                  onStatusUpdate({
+                    status: 'error',
+                    progress: 0,
+                    currentStep: 'Failed',
+                    error: errorData.error
+                  });
+                }
+                break;
+            }
+          }
+        );
+      }
+
+      // Step 3: Poll for status as fallback/primary
       let workflowStatus = await this.pollWorkflowStatus(sessionId, onStatusUpdate);
 
-      // Step 3: Handle human-in-the-loop interactions
+      // Step 4: Handle human-in-the-loop interactions
       while (
         workflowStatus.workflowState === 'awaiting_selection' ||
         workflowStatus.workflowState === 'awaiting_replacement'
       ) {
-        if (workflowStatus.workflowState === 'awaiting_selection' && onAwaitingSelection) {
-          // Wait for user to select stories via callback
-          await new Promise<void>((resolve) => {
-            onAwaitingSelection(sessionId, workflowStatus.researchOutput!);
-            // The UI will call submitStorySelection when user confirms
-            // We need to poll again after that
-            const checkResumed = async () => {
-              const status = await this.getWorkflowStatus(sessionId);
-              if (status.workflowState !== 'awaiting_selection') {
-                resolve();
-              } else {
-                setTimeout(checkResumed, 1000);
-              }
-            };
-            setTimeout(checkResumed, 1000);
-          });
-        }
-
-        if (workflowStatus.workflowState === 'awaiting_replacement' && onAwaitingReplacement) {
-          // Wait for user to select replacement via callback
-          await new Promise<void>((resolve) => {
-            onAwaitingReplacement(sessionId, workflowStatus.failedStory!, workflowStatus.replacementOptions!);
-            // The UI will call submitReplacementSelection when user confirms
-            const checkResumed = async () => {
-              const status = await this.getWorkflowStatus(sessionId);
-              if (status.workflowState !== 'awaiting_replacement') {
-                resolve();
-              } else {
-                setTimeout(checkResumed, 1000);
-              }
-            };
-            setTimeout(checkResumed, 1000);
-          });
-        }
-
-        // Continue polling
+        // These will be handled by WebSocket callbacks or the polling will continue
+        // after the user submits via the UI
         workflowStatus = await this.pollWorkflowStatus(sessionId, onStatusUpdate);
       }
 
-      // Step 4: Handle final state
+      // Cleanup WebSocket
+      if (disconnectWebSocket) {
+        disconnectWebSocket();
+      }
+
+      // Step 5: Handle final state
       if (workflowStatus.workflowState === 'complete') {
         return {
           success: true,
           jobId: sessionId,
+          sessionId: sessionId,
           mp3Url: workflowStatus.mp3Url,
           filename: workflowStatus.filename,
           metadata: {
@@ -339,12 +468,27 @@ export class AutogenAPI {
   }
 
   async getOutputs(): Promise<{files: {filename: string; url: string; created: Date}[]}> {
-    const response = await fetch(`${this.baseUrl}/api/outputs`);
+    const response = await fetch(`${this.pythonUrl}/outputs`);
+    return response.json();
+  }
+
+  async getFileMetadata(filename: string): Promise<{
+    filename: string;
+    size: number;
+    sizeFormatted: string;
+    estimatedDuration: string;
+    created: string;
+    url: string;
+  }> {
+    const response = await fetch(`${this.pythonUrl}/output/${filename}/metadata`);
+    if (!response.ok) {
+      throw new Error('Failed to get file metadata');
+    }
     return response.json();
   }
 
   getDownloadUrl(filename: string): string {
-    return `${this.baseUrl}/output/${filename}`;
+    return `${this.pythonUrl}/output/${filename}`;
   }
 }
 

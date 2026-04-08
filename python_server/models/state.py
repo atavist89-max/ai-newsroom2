@@ -1,0 +1,155 @@
+"""
+Workflow State Management Models
+"""
+
+from enum import Enum
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel
+from datetime import datetime
+
+
+class WorkflowState(str, Enum):
+    """Possible workflow states."""
+    RUNNING = "running"
+    AWAITING_SELECTION = "awaiting_selection"
+    AWAITING_REPLACEMENT = "awaiting_replacement"
+    ERROR = "error"
+    COMPLETE = "complete"
+    TIMEOUT = "timeout"
+
+
+class AgentStatus(str, Enum):
+    """Possible agent statuses."""
+    IDLE = "idle"
+    WORKING = "working"
+    COMPLETED = "completed"
+    ERROR = "error"
+    WAITING_FOR_HUMAN = "waiting_for_human"
+
+
+class Story(BaseModel):
+    """Story model."""
+    id: str
+    headline: str
+    summary: str
+    newsRating: int
+    source: str
+    originalLanguage: str
+    section: str  # 'local' | 'continent'
+    url: Optional[str] = None
+
+
+class FailedStory(BaseModel):
+    """Failed story model."""
+    storyId: str
+    headline: str
+    reason: str
+
+
+class AgentState(BaseModel):
+    """Individual agent state."""
+    name: str
+    role: str
+    avatar: str
+    status: AgentStatus = AgentStatus.IDLE
+    current_task: Optional[str] = None
+    progress: int = 0
+    messages: List[Dict[str, Any]] = []
+    output: Optional[str] = None
+    error: Optional[str] = None
+    start_time: Optional[datetime] = None  # When agent started working
+    api_call_start: Optional[datetime] = None  # When API call started
+
+
+class WorkflowSession(BaseModel):
+    """Complete workflow session state."""
+    session_id: str
+    state: WorkflowState = WorkflowState.RUNNING
+    current_step: str = "initializing"
+    progress: int = 0
+    
+    # Store config for workflow continuation after human input
+    config: Optional[Dict[str, Any]] = None
+    
+    # Agent states
+    agents: Dict[str, AgentState] = {}
+    
+    # Research phase
+    research_output: Optional[Dict[str, List[Story]]] = None
+    
+    # User selections
+    user_selection: Optional[Dict[str, List[str]]] = None
+    
+    # Recovery phase
+    failed_story: Optional[FailedStory] = None
+    replacement_options: Optional[List[Story]] = None
+    
+    # Output
+    draft_script: Optional[str] = None
+    mp3_url: Optional[str] = None
+    filename: Optional[str] = None
+    
+    # Metadata
+    created_at: datetime = datetime.now()
+    updated_at: datetime = datetime.now()
+    error: Optional[str] = None
+    
+    # Execution Workflow Tracking (Writer <-> Editor loop)
+    # Step 1: Researcher → selected_stories.json (human selects stories ONCE)
+    selected_stories_json: Optional[Dict[str, Any]] = None  # Headlines, Summary, Website, News Topic
+    
+    # Step 2: Writer → First_Draft.md
+    first_draft_md: Optional[str] = None
+    
+    # Step 3: Editor → evaluation.json (criteria, pass/fail, reason, correction guidance)
+    editor_evaluation_json: Optional[Dict[str, Any]] = None
+    editor_evaluation_passed: bool = False
+    
+    # Step 4: Fact Checker → fact_check.json (pass/fail per headline)
+    fact_check_json: Optional[Dict[str, Any]] = None
+    fact_check_all_passed: bool = False
+    
+    # Step 5: Writer <-> Editor loop tracking
+    writer_editor_loop_count: int = 0
+    max_writer_editor_loops: int = 3
+    
+    # Final approved script
+    final_script: Optional[str] = None
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
+
+
+# In-memory session storage (replace with Redis in production)
+_sessions: Dict[str, WorkflowSession] = {}
+
+
+def get_session(session_id: str) -> Optional[WorkflowSession]:
+    """Get a workflow session by ID."""
+    return _sessions.get(session_id)
+
+
+def save_session(session: WorkflowSession):
+    """Save or update a workflow session."""
+    session.updated_at = datetime.now()
+    _sessions[session.session_id] = session
+
+
+def delete_session(session_id: str):
+    """Delete a workflow session."""
+    if session_id in _sessions:
+        del _sessions[session_id]
+
+
+def cleanup_old_sessions(max_age_minutes: int = 60):
+    """Clean up old sessions."""
+    now = datetime.now()
+    to_delete = []
+    for session_id, session in _sessions.items():
+        age = (now - session.updated_at).total_seconds() / 60
+        if age > max_age_minutes:
+            to_delete.append(session_id)
+    for session_id in to_delete:
+        delete_session(session_id)
