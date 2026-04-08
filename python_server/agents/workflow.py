@@ -15,7 +15,7 @@ from autogen_agentchat.messages import ChatMessage
 from .loader import get_agent_loader
 from models.state import (
     WorkflowSession, WorkflowState, AgentState, AgentStatus,
-    Story, FailedStory, save_session, get_session
+    Story, FailedStory, save_session, get_session, ActivityLogEntry
 )
 
 
@@ -49,6 +49,27 @@ class WorkflowOrchestrator:
                 await self.event_callback(event_type, data)
             except Exception as e:
                 print(f"[Workflow] Error emitting event {event_type}: {e}")
+    
+    async def _emit_and_log(self, session: WorkflowSession, event_type: str, data: Dict[str, Any], agent: Optional[str] = None, message: Optional[str] = None):
+        """Emit event and log to activity log for Agent Log UI.
+        
+        This combines WebSocket emission with persistent activity logging.
+        """
+        # Emit via WebSocket (real-time UI updates)
+        await self.emit(event_type, data)
+        
+        # Store in activity log (for timeline replay)
+        from models.state import ActivityLogEntry
+        session.activity_log.append(
+            ActivityLogEntry(
+                timestamp=datetime.now().isoformat(),
+                event_type=event_type,
+                agent=agent,
+                message=message,
+                data=data
+            )
+        )
+        save_session(session)
     
     def _create_agent_states(self) -> Dict[str, AgentState]:
         """Create initial agent states."""
@@ -113,14 +134,19 @@ class WorkflowOrchestrator:
             "content": f"🚀 STARTED: {task}"
         })
         
-        await self.emit("agent_started", {
-            "session_id": session.session_id,
-            "agent": agent_name,
-            "task": task,
-            "timestamp": datetime.now().isoformat(),
-            "message": f"[{agent_name}] {task}"
-        })
-        save_session(session)
+        await self._emit_and_log(
+            session, 
+            "agent_started", 
+            {
+                "session_id": session.session_id,
+                "agent": agent_name,
+                "task": task,
+                "timestamp": datetime.now().isoformat(),
+                "message": f"[{agent_name}] {task}"
+            },
+            agent=agent_name,
+            message=f"🚀 STARTED: {task}"
+        )
     
     async def _agent_working(
         self,
@@ -148,15 +174,20 @@ class WorkflowOrchestrator:
         }
         agent.messages.append(log_entry)
         
-        await self.emit("agent_working", {
-            "session_id": session.session_id,
-            "agent": agent_name,
-            "message": message,
-            "progress": progress,
-            "timestamp": datetime.now().isoformat(),
-            "elapsed_seconds": int(elapsed) if elapsed_str else 0
-        })
-        save_session(session)
+        await self._emit_and_log(
+            session,
+            "agent_working",
+            {
+                "session_id": session.session_id,
+                "agent": agent_name,
+                "message": message,
+                "progress": progress,
+                "timestamp": datetime.now().isoformat(),
+                "elapsed_seconds": int(elapsed) if elapsed_str else 0
+            },
+            agent=agent_name,
+            message=f"⏳ {elapsed_str}{progress}% - {message}"
+        )
     
     async def _agent_api_call_started(self, session: WorkflowSession, agent_name: str, api_name: str = "Kimi"):
         """Log when an external API call starts."""
@@ -323,6 +354,23 @@ class WorkflowOrchestrator:
             duration = (datetime.now() - start_time).total_seconds()
             await self._agent_api_call_completed(session, agent_name, duration)
             
+            # STORE RAW LLM OUTPUTS for Agent Log UI
+            if result.messages:
+                if agent_name not in session.agent_outputs:
+                    session.agent_outputs[agent_name] = []
+                
+                for msg in result.messages:
+                    if hasattr(msg, 'content') and msg.content:
+                        from models.state import AgentOutput
+                        session.agent_outputs[agent_name].append(
+                            AgentOutput(
+                                role=getattr(msg, 'role', 'assistant'),
+                                content=msg.content[:50000],  # Limit size to 50KB
+                                timestamp=datetime.now().isoformat()
+                            )
+                        )
+                save_session(session)
+            
             return result
             
         except asyncio.TimeoutError:
@@ -435,10 +483,15 @@ class WorkflowOrchestrator:
             save_session(session)
         
         try:
-            await self.emit("workflow_started", {
-                "session_id": session_id,
-                "config": config
-            })
+            await self._emit_and_log(
+                session,
+                "workflow_started",
+                {
+                    "session_id": session_id,
+                    "config": config
+                },
+                message="🎬 Workflow started"
+            )
             
             # Step 1: News Research
             await self._run_research_phase(session, config)
@@ -449,14 +502,19 @@ class WorkflowOrchestrator:
             
             # Wait for human story selection
             if session.state == WorkflowState.AWAITING_SELECTION:
-                await self.emit("workflow_paused", {
-                    "session_id": session_id,
-                    "reason": "awaiting_selection",
-                    "data": {
-                        "localStories": [s.model_dump() for s in session.research_output.get("localStories", [])],
-                        "continentStories": [s.model_dump() for s in session.research_output.get("continentStories", [])]
-                    }
-                })
+                await self._emit_and_log(
+                    session,
+                    "workflow_paused",
+                    {
+                        "session_id": session_id,
+                        "reason": "awaiting_selection",
+                        "data": {
+                            "localStories": [s.model_dump() for s in session.research_output.get("localStories", [])],
+                            "continentStories": [s.model_dump() for s in session.research_output.get("continentStories", [])]
+                        }
+                    },
+                    message=f"⏸️ Paused: Awaiting story selection ({len(session.research_output.get('localStories', []))} local, {len(session.research_output.get('continentStories', []))} continent stories)"
+                )
                 return  # Will be resumed by external call via submit_story_selection
             
             # ============================================================
@@ -480,14 +538,19 @@ class WorkflowOrchestrator:
             
             # Check if waiting for replacement
             if session.state == WorkflowState.AWAITING_REPLACEMENT:
-                await self.emit("workflow_paused", {
-                    "session_id": session_id,
-                    "reason": "awaiting_replacement",
-                    "data": {
-                        "failedStory": session.failed_story.model_dump() if session.failed_story else None,
-                        "alternatives": [s.model_dump() for s in session.replacement_options] if session.replacement_options else []
-                    }
-                })
+                await self._emit_and_log(
+                    session,
+                    "workflow_paused",
+                    {
+                        "session_id": session_id,
+                        "reason": "awaiting_replacement",
+                        "data": {
+                            "failedStory": session.failed_story.model_dump() if session.failed_story else None,
+                            "alternatives": [s.model_dump() for s in session.replacement_options] if session.replacement_options else []
+                        }
+                    },
+                    message=f"⏸️ Paused: Awaiting replacement selection for '{session.failed_story.headline if session.failed_story else 'failed story'}'"
+                )
                 return
             
             # Step 5: Final Editor
@@ -502,24 +565,37 @@ class WorkflowOrchestrator:
             session.progress = 100
             save_session(session)
             
-            await self.emit("workflow_completed", {
-                "session_id": session_id,
-                "mp3_url": session.mp3_url,
-                "filename": session.filename
-            })
+            await self._emit_and_log(
+                session,
+                "workflow_completed",
+                {
+                    "session_id": session_id,
+                    "mp3_url": session.mp3_url,
+                    "filename": session.filename
+                },
+                message=f"✅ Workflow completed! Generated: {session.filename}"
+            )
             
         except Exception as e:
             session.state = WorkflowState.ERROR
             session.error = str(e)
             save_session(session)
             
-            await self.emit("workflow_error", {
-                "session_id": session_id,
-                "error": str(e)
-            })
+            await self._emit_and_log(
+                session,
+                "workflow_error",
+                {
+                    "session_id": session_id,
+                    "error": str(e)
+                },
+                agent="system",
+                message=f"❌ Workflow error: {str(e)[:100]}"
+            )
     
     async def _run_research_phase(self, session: WorkflowSession, config: Dict[str, Any]):
         """Run the news research phase using the actual news_researcher agent."""
+        from datetime import datetime
+        
         session.current_step = "researching"
         session.progress = 10
         save_session(session)
@@ -535,21 +611,25 @@ class WorkflowOrchestrator:
             if not agent:
                 raise ValueError("news_researcher agent not found")
             
+            # Use current date, not config date
+            today = datetime.now().strftime("%Y-%m-%d")
+            
             # Prepare the research task message
             task_message = f"""Research news for {config['country']['name']} ({config['country']['language']}).
 
 Topics: {', '.join(config['topics'])}
-Timeframe: Past {config['timeframe']['days']} days
-Date: {config['date']}
+Timeframe: Past {config['timeframe']['days']} days (up to {today})
+Date: {today}
 
 Local News Sources: {', '.join(config['country']['newsSources'])}
 Continent: {config['continent']['name']}
 Continent Sources: {', '.join([s['name'] for s in config['continent']['newsSources']])}
 
 Search for at least 10 local stories and 5 continent stories.
+Use the search_web tool to find REAL news stories - do NOT generate fake stories.
 Translate all content to English.
 Output as JSON with localStories and continentStories arrays.
-Each story should have: id, headline, summary, newsRating (1-10), source, originalLanguage, section."""
+Each story should have: id, headline, summary, newsRating (1-10), source, originalLanguage, section, url."""
 
             await self._agent_working(
                 session, "news_researcher",
@@ -1214,6 +1294,16 @@ This is the FINAL gate. Review thoroughly and return decision as JSON."""
                 await self._agent_working(session, "news_researcher", f"🌍 {story.headline[:60]}...", 50)
             
             session.selected_stories_json = stories_json
+            
+            # STORE ARTIFACT for Agent Log UI
+            session.artifacts["selected_stories_json"] = {
+                "type": "json",
+                "label": "Selected Stories",
+                "description": f"{len(selected_local)} local + {len(selected_continent)} continent stories selected by user",
+                "data": stories_json,
+                "created_at": datetime.now().isoformat()
+            }
+            
             save_session(session)
             
             await self._agent_completed(session, "news_researcher", f"selected_stories.json created: {len(selected_local)} local + {len(selected_continent)} continent stories")
@@ -1280,6 +1370,16 @@ Output the complete First_Draft.md script."""
             
             # Save as First_Draft.md
             session.first_draft_md = output_text
+            
+            # STORE ARTIFACT for Agent Log UI
+            session.artifacts["first_draft_md"] = {
+                "type": "markdown",
+                "label": "First Draft",
+                "description": f"Initial script ({len(output_text)} characters)",
+                "data": output_text,
+                "created_at": datetime.now().isoformat()
+            }
+            
             save_session(session)
             
             await self._agent_completed(session, "final_writer", f"First_Draft.md written ({len(output_text)} chars)")
@@ -1368,6 +1468,18 @@ Output the complete First_Draft.md script."""
                 
                 # Save evaluation.json
                 session.editor_evaluation_json = evaluation
+                
+                # STORE ARTIFACT for Agent Log UI
+                passed_count = sum(1 for c in criteria.values() if c.get("status") == "PASS")
+                total_count = len(criteria)
+                session.artifacts[f"evaluation_attempt_{session.writer_editor_loop_count}.json"] = {
+                    "type": "json",
+                    "label": f"Editor Evaluation (Attempt {session.writer_editor_loop_count})",
+                    "description": f"{passed_count}/{total_count} criteria passed - {decision}",
+                    "data": evaluation,
+                    "created_at": datetime.now().isoformat()
+                }
+                
                 save_session(session)
                 
                 # Print evaluation table in Agent Activity Log
@@ -1538,6 +1650,18 @@ Mark as FAILED if any core fact cannot be verified."""
                 
                 # Save fact_check.json
                 session.fact_check_json = fact_check
+                
+                # STORE ARTIFACT for Agent Log UI
+                fully_correct = sum(1 for s in stories if "FULLY CORRECT" in s.get("grade", ""))
+                partially_correct = sum(1 for s in stories if "PARTIALLY" in s.get("grade", ""))
+                failed = sum(1 for s in stories if "FAILED" in s.get("grade", ""))
+                session.artifacts["fact_check.json"] = {
+                    "type": "json",
+                    "label": "Fact Check Results",
+                    "description": f"{fully_correct} fully correct, {partially_correct} partial, {failed} failed",
+                    "data": fact_check,
+                    "created_at": datetime.now().isoformat()
+                }
                 
                 # Print fact check results in Agent Activity Log
                 await self._agent_working(session, "fact_checker", f"Overall: {overall_status}", 60)
@@ -2061,15 +2185,20 @@ Generate all audio and assemble into final MP3."""
                         
                         # Check if waiting for replacement selection
                         if session.state == WorkflowState.AWAITING_REPLACEMENT:
-                            await self.emit("workflow_paused", {
-                                "session_id": session_id,
-                                "reason": "awaiting_replacement",
-                                "data": {
-                                    "failedStory": session.failed_story.model_dump() if session.failed_story else None,
-                                    "alternatives": [s.model_dump() for s in session.replacement_options] if session.replacement_options else [],
-                                    "justification": failed_stories[0].get("severe_issues", ["Severe fact check failure"])
-                                }
-                            })
+                            await self._emit_and_log(
+                                session,
+                                "workflow_paused",
+                                {
+                                    "session_id": session_id,
+                                    "reason": "awaiting_replacement",
+                                    "data": {
+                                        "failedStory": session.failed_story.model_dump() if session.failed_story else None,
+                                        "alternatives": [s.model_dump() for s in session.replacement_options] if session.replacement_options else [],
+                                        "justification": failed_stories[0].get("severe_issues", ["Severe fact check failure"])
+                                    }
+                                },
+                                message=f"⏸️ Paused: Story '{session.failed_story.headline if session.failed_story else 'failed'}' requires replacement ({len(session.replacement_options) if session.replacement_options else 0} alternatives)"
+                            )
                             return
                         
                         # Writer fixes the script with replacements
@@ -2092,7 +2221,13 @@ Generate all audio and assemble into final MP3."""
                 session.state = WorkflowState.ERROR
                 session.error = error_msg
                 save_session(session)
-                await self.emit("workflow_error", {"session_id": session_id, "error": error_msg})
+                await self._emit_and_log(
+                    session,
+                    "workflow_error",
+                    {"session_id": session_id, "error": error_msg},
+                    agent="system",
+                    message=f"❌ Max iterations reached: Could not get approval after {max_loops} attempts"
+                )
                 return
             
             # ============================================================
@@ -2109,11 +2244,16 @@ Generate all audio and assemble into final MP3."""
             save_session(session)
             
             print(f"[Workflow] Workflow completed for session {session_id}")
-            await self.emit("workflow_completed", {
-                "session_id": session_id,
-                "mp3_url": session.mp3_url,
-                "filename": session.filename
-            })
+            await self._emit_and_log(
+                session,
+                "workflow_completed",
+                {
+                    "session_id": session_id,
+                    "mp3_url": session.mp3_url,
+                    "filename": session.filename
+                },
+                message=f"✅ Workflow completed! Generated: {session.filename}"
+            )
             
         except Exception as e:
             print(f"[Workflow] Error in continuation: {e}")
@@ -2122,7 +2262,13 @@ Generate all audio and assemble into final MP3."""
             session.state = WorkflowState.ERROR
             session.error = str(e)
             save_session(session)
-            await self.emit("workflow_error", {"session_id": session_id, "error": str(e)})
+            await self._emit_and_log(
+                session,
+                "workflow_error",
+                {"session_id": session_id, "error": str(e)},
+                agent="system",
+                message=f"❌ Error in continuation: {str(e)[:100]}"
+            )
     
     async def submit_story_selection(
         self,

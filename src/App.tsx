@@ -14,6 +14,7 @@ import type { Country, Continent, Timeframe, Topic as TopicType, Voice, MusicSui
 import { WorldMap } from './components/WorldMap';
 import { StorySelector } from './components/StorySelector';
 import { ReplacementSelector } from './components/ReplacementSelector';
+import { AgentLog } from './components/agent-log';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -46,6 +47,9 @@ function App() {
   
   // Polling ref
   const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  
+  // Agent Log visibility
+  const [isAgentLogVisible, setIsAgentLogVisible] = useState(false);
 
   // Generate prompt
   const promptResult = useMemo(() => {
@@ -350,6 +354,13 @@ Generate the final podcast using generate_speech with voice ${config.voice.voice
         />
       )}
       
+      {/* Agent Log Panel */}
+      <AgentLog
+        sessionId={sessionId}
+        isVisible={isAgentLogVisible}
+        onClose={() => setIsAgentLogVisible(false)}
+      />
+      
       {/* Header */}
       <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur">
         <div className="max-w-7xl mx-auto px-4 py-4">
@@ -577,9 +588,17 @@ Generate the final podcast using generate_speech with voice ${config.voice.voice
                   />
                 </div>
                 {sessionId && (
-                  <p className="text-xs text-slate-500">
-                    Session: {sessionId.slice(0, 8)}...
-                  </p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-slate-500">
+                      Session: {sessionId.slice(0, 8)}...
+                    </p>
+                    <button
+                      onClick={() => setIsAgentLogVisible(true)}
+                      className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                    >
+                      📋 View Agent Log
+                    </button>
+                  </div>
                 )}
               </div>
             )}

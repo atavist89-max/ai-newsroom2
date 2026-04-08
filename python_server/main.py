@@ -360,6 +360,131 @@ async def resume_workflow(session_id: str):
     return {"success": True, "message": "Workflow resumed"}
 
 
+# Agent Log API Endpoints
+@app.get("/workflow/{session_id}/artifacts")
+async def get_workflow_artifacts(session_id: str):
+    """Get all artifacts for a workflow session."""
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    return {
+        "sessionId": session_id,
+        "artifacts": session.artifacts,
+        "artifactTypes": list(session.artifacts.keys())
+    }
+
+
+@app.get("/workflow/{session_id}/artifacts/{artifact_type}")
+async def get_specific_artifact(session_id: str, artifact_type: str):
+    """Get a specific artifact by type."""
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    if artifact_type not in session.artifacts:
+        raise HTTPException(status_code=404, detail=f"Artifact type '{artifact_type}' not found")
+    
+    return {
+        "sessionId": session_id,
+        "artifactType": artifact_type,
+        "content": session.artifacts[artifact_type]
+    }
+
+
+@app.get("/workflow/{session_id}/activity-log")
+async def get_activity_log(session_id: str, limit: int = 100):
+    """Get activity log for a workflow session."""
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    # Return most recent events first, limited by 'limit'
+    logs = session.activity_log[-limit:] if len(session.activity_log) > limit else session.activity_log
+    
+    return {
+        "sessionId": session_id,
+        "totalEvents": len(session.activity_log),
+        "events": logs
+    }
+
+
+@app.get("/workflow/{session_id}/agent-outputs")
+async def get_agent_outputs(session_id: str, agent: Optional[str] = None):
+    """Get raw agent outputs for a workflow session."""
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    if agent:
+        # Return outputs for specific agent
+        return {
+            "sessionId": session_id,
+            "agent": agent,
+            "outputs": session.agent_outputs.get(agent, [])
+        }
+    
+    # Return all agent outputs
+    return {
+        "sessionId": session_id,
+        "agents": list(session.agent_outputs.keys()),
+        "outputs": session.agent_outputs
+    }
+
+
+@app.get("/workflow/{session_id}/full-state")
+async def get_full_workflow_state(session_id: str):
+    """Get complete workflow state including status, artifacts, and logs."""
+    session = get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    return {
+        "sessionId": session.session_id,
+        "workflowState": session.state.value,
+        "currentStep": session.current_step,
+        "progress": session.progress,
+        "agents": {
+            name: {
+                "name": agent.name,
+                "role": agent.role,
+                "avatar": agent.avatar,
+                "status": agent.status.value,
+                "currentTask": agent.current_task,
+                "progress": agent.progress,
+                "error": agent.error
+            }
+            for name, agent in session.agents.items()
+        },
+        "researchOutput": {
+            "localStories": [s.model_dump() for s in session.research_output.get("localStories", [])],
+            "continentStories": [s.model_dump() for s in session.research_output.get("continentStories", [])]
+        } if session.research_output else None,
+        "failedStory": session.failed_story.model_dump() if session.failed_story else None,
+        "replacementOptions": [s.model_dump() for s in session.replacement_options] if session.replacement_options else None,
+        "mp3Url": session.mp3_url,
+        "filename": session.filename,
+        "error": session.error,
+        # Agent Log fields
+        "artifacts": session.artifacts,
+        "artifactTypes": list(session.artifacts.keys()),
+        "activityLog": session.activity_log[-50:],  # Last 50 events
+        "totalEvents": len(session.activity_log),
+        "agentOutputs": {
+            k: [
+                {"role": o.role, "content": o.content[:10000], "timestamp": o.timestamp}
+                for o in v[-5:]  # Last 5 messages per agent, limited content
+            ]
+            for k, v in session.agent_outputs.items()
+        }
+    }
+
+
 # Run server
 if __name__ == "__main__":
     import uvicorn

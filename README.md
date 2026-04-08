@@ -4,6 +4,13 @@ A fully-automated, multi-agent podcast production system that researches real ne
 
 **Live Demo:** https://ccn7h2z5m53rm.ok.kimi.link
 
+## What's New
+
+- **🔍 Real Web Search**: Agents now use DuckDuckGo to find actual news (no more generated fake stories!)
+- **📋 Agent Log**: Debug and monitor your workflow with Activity Timeline, Artifacts Grid, and Raw LLM Outputs
+- **🛠️ Tool System**: Each agent has specialized tools (web search, file I/O, text analysis, validation)
+- **📅 Current Date Handling**: Fixed date issue - now uses actual current date instead of 2026
+
 ---
 
 ## Overview
@@ -12,11 +19,12 @@ The AI Newsroom uses a sophisticated **7-agent execution workflow** powered by A
 
 ### What Makes This Different
 
-- **Real News, Real Time**: Agents search actual news sources in native languages
+- **Real News, Real Time**: Agents use web search to find actual news from real sources
 - **Strict Editorial Process**: Two-phase editor review with 11 hard requirements
 - **Rejection Loops**: Failed scripts automatically return for revision (up to 3 attempts)
 - **Human-in-the-Loop**: Review gates for story selection and fact-check failures
-- **Transparent Process**: Real-time agent activity log with pass/fail criteria tracking
+- **Agent Log**: Full visibility into agent activity, artifacts, and raw LLM outputs
+- **Tool System**: Each agent has specialized tools for search, file I/O, and validation
 - **Error Resilience**: Graceful handling of API failures and parsing errors
 
 ---
@@ -151,6 +159,60 @@ The workflow pauses at two points for human review:
 
 ---
 
+## Agent Log & Debugging
+
+The **Agent Log** provides full visibility into the workflow execution:
+
+### Activity Timeline
+- Chronological view of all agent events
+- Real-time updates via WebSocket
+- Agent icons, timestamps, and messages
+- Event types: `agent_started`, `agent_working`, `agent_completed`, `workflow_paused`, etc.
+
+### Artifacts Grid
+- View all generated JSONs and Markdowns
+- Selected stories, first draft, evaluations, fact checks
+- Click to view full content
+- Copy to clipboard
+
+### Raw LLM Outputs
+- See actual LLM messages per agent
+- Tool call traces (`search_web`, `fetch_url`, etc.)
+- Debug agent reasoning
+- Token counts and timestamps
+
+**Access**: Click "📋 View Agent Log" during workflow execution
+
+---
+
+## Agent Tool System
+
+Each agent has access to specialized tools:
+
+| Tool | Description | Used By |
+|------|-------------|---------|
+| `web_search` | Search DuckDuckGo for real news | Researcher, Fact Checker, Recovery |
+| `fetch_url` | Fetch article content | Researcher, Fact Checker, Recovery |
+| `check_url` | Verify URL accessibility | Researcher, Fact Checker |
+| `read_file` | Read artifacts (JSON, Markdown) | Editor, Writer, Final Editor, Audio |
+| `write_file` | Save artifacts to disk | Writer |
+| `list_files` | List output directory | Audio Producer |
+| `count_words` | Count words/characters | Editor, Writer, Final Editor |
+| `summarize_text` | Summarize articles | Writer, Recovery |
+| `validate_json` | Validate JSON format | Editor, Fact Checker, Final Editor, Audio |
+
+### Tool Usage Example
+
+When the `news_researcher` runs, you'll see in the Agent Log:
+```
+[Tool Call] search_web("Albania news today")
+[Result] 10 search results with real URLs
+[Tool Call] fetch_url("https://real-news-source.com/article")
+[Result] Article content for verification
+```
+
+---
+
 ## Features
 
 ### Geographic Coverage
@@ -181,8 +243,9 @@ The workflow pauses at two points for human review:
 ### Backend (Python)
 - **FastAPI** - REST API framework
 - **Socket.IO** - Real-time WebSocket communication
-- **AutoGen v0.4** - Multi-agent orchestration
+- **AutoGen v0.5** - Multi-agent orchestration with tool support
 - **Kimi API** - LLM for agent reasoning
+- **DuckDuckGo Search** - Web search for real news
 - **Pydantic** - Data validation and serialization
 
 ### Frontend (TypeScript/React)
@@ -340,6 +403,14 @@ Use the provided `.vscode/tasks.json` to start all servers with Ctrl+Shift+P →
 | `/workflow/{id}/status` | GET | Get current workflow status |
 | `/workflow/{id}/stop` | POST | Stop running workflow |
 
+### Agent Log Endpoints
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/workflow/{id}/artifacts` | GET | Get all artifacts (JSONs, Markdowns) |
+| `/workflow/{id}/activity-log` | GET | Get chronological event log |
+| `/workflow/{id}/agent-outputs` | GET | Get raw LLM outputs per agent |
+| `/workflow/{id}/full-state` | GET | Get complete state (status + artifacts + logs) |
+
 ### WebSocket Events (Client → Server)
 | Event | Data | Description |
 |-------|------|-------------|
@@ -413,18 +484,24 @@ ai-newsroom/
 ├── python_server/          # Python backend
 │   ├── agents/            # Agent definitions & workflow
 │   │   ├── workflow.py    # Main orchestrator with execution flow
-│   │   └── loader.py      # Agent loader
+│   │   └── loader.py      # Agent loader with tool registry
 │   ├── models/            # Pydantic models
-│   │   └── state.py       # Workflow state with criteria tracking
+│   │   └── state.py       # Workflow state with artifacts & logs
+│   ├── tools/             # Agent tools
+│   │   ├── web_search.py  # DuckDuckGo search & URL fetch
+│   │   ├── file_tools.py  # Read/write/list files
+│   │   ├── text_tools.py  # Word count & summarization
+│   │   └── validation_tools.py  # JSON & URL validation
 │   └── main.py            # FastAPI app
 ├── server/                # Node.js proxy
 │   └── index.ts           # Express server
 ├── src/                   # React frontend
 │   ├── components/        # UI components
+│   │   └── agent-log/     # Agent Log (timeline, artifacts, outputs)
 │   ├── data/             # Static data
 │   └── hooks/            # Custom hooks
 ├── autogen-config/        # Agent configs
-│   └── agents/           # JSON agent definitions
+│   └── agents/           # JSON agent definitions with tools
 └── public/               # Static assets
 ```
 
