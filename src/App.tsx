@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Toaster, toast } from 'sonner';
 import { Mic2, Music, Globe, Clock, FileText, Copy, Check, Radio, Newspaper, Loader2, Download } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
@@ -9,9 +9,11 @@ import { topics } from './data/topics';
 import { voices } from './data/voices';
 import { musicSuites } from './data/music';
 import { autogenAPI } from './api/autogen';
-import type { PodcastConfig } from './types/podcast';
+import type { PodcastConfig, Story, FailedStory, WorkflowState } from './types/podcast';
 import type { Country, Continent, Timeframe, Topic as TopicType, Voice, MusicSuite } from './types';
 import { WorldMap } from './components/WorldMap';
+import { StorySelector } from './components/StorySelector';
+import { ReplacementSelector } from './components/ReplacementSelector';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -33,6 +35,17 @@ function App() {
   const [generationProgress, setGenerationProgress] = useState(0);
   const [mp3Url, setMp3Url] = useState<string | null>(null);
   const [generationError, setGenerationError] = useState<string | null>(null);
+  
+  // Human-in-the-Loop states
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [workflowState, setWorkflowState] = useState<WorkflowState | null>(null);
+  const [researchOutput, setResearchOutput] = useState<{ localStories: Story[]; continentStories: Story[] } | null>(null);
+  const [failedStory, setFailedStory] = useState<FailedStory | null>(null);
+  const [replacementOptions, setReplacementOptions] = useState<Story[] | null>(null);
+  const [isSubmittingSelection, setIsSubmittingSelection] = useState(false);
+  
+  // Polling ref
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Generate prompt
   const promptResult = useMemo(() => {
@@ -68,6 +81,61 @@ function App() {
     });
   }, []);
 
+  // Stop polling
+  const stopPolling = useCallback(() => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+  }, []);
+
+  // Start polling for workflow status
+  const startPolling = useCallback((sid: string) => {
+    stopPolling();
+    
+    pollingIntervalRef.current = setInterval(async () => {
+      try {
+        const status = await autogenAPI.getWorkflowStatus(sid);
+        
+        setGenerationStatus(status.currentStep);
+        setGenerationProgress(status.progress);
+        setWorkflowState(status.workflowState);
+        
+        // Handle different workflow states
+        if (status.workflowState === 'awaiting_selection') {
+          setResearchOutput(status.researchOutput || null);
+          stopPolling();
+        } else if (status.workflowState === 'awaiting_replacement') {
+          setFailedStory(status.failedStory || null);
+          setReplacementOptions(status.replacementOptions || null);
+          stopPolling();
+        } else if (status.workflowState === 'complete') {
+          setMp3Url(status.mp3Url || null);
+          setIsGenerating(false);
+          toast.success('Podcast generated successfully!');
+          stopPolling();
+        } else if (status.workflowState === 'error' || status.workflowState === 'timeout') {
+          setGenerationError(status.error || 'Workflow failed');
+          setIsGenerating(false);
+          toast.error(status.error || 'Generation failed');
+          stopPolling();
+        }
+      } catch (error: any) {
+        console.error('Polling error:', error);
+        setGenerationError(error.message);
+        setIsGenerating(false);
+        stopPolling();
+      }
+    }, 2000);
+  }, [stopPolling]);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      stopPolling();
+    };
+  }, [stopPolling]);
+
   // Handle podcast generation
   const handleGeneratePodcast = useCallback(async () => {
     if (!selectedCountry || !selectedContinent || selectedTopics.length === 0 || !selectedVoice) {
@@ -102,27 +170,88 @@ function App() {
       setIsGenerating(true);
       setGenerationError(null);
       setMp3Url(null);
-      setGenerationStatus('Researching news...');
+      setGenerationStatus('Starting research...');
       setGenerationProgress(10);
+      
+      // Reset HITL states
+      setSessionId(null);
+      setWorkflowState(null);
+      setResearchOutput(null);
+      setFailedStory(null);
+      setReplacementOptions(null);
 
-      const result = await autogenAPI.generatePodcast(config, (statusUpdate) => {
-        setGenerationStatus(statusUpdate.currentStep || statusUpdate.status);
-        setGenerationProgress(statusUpdate.progress);
-      });
-
-      if (result.success && result.mp3Url) {
-        setMp3Url(result.mp3Url);
-        setGenerationStatus('Complete!');
-        toast.success('Podcast generated successfully!');
-      }
+      // Start the workflow
+      const { sessionId: sid } = await autogenAPI.startGeneration(config);
+      setSessionId(sid);
+      
+      // Start polling for status
+      startPolling(sid);
+      
     } catch (err: any) {
       setGenerationError(err.message || 'Generation failed');
       setGenerationStatus('Error');
-      toast.error(err.message || 'Generation failed');
-    } finally {
       setIsGenerating(false);
+      toast.error(err.message || 'Generation failed');
     }
-  }, [selectedCountry, selectedContinent, selectedTimeframe, selectedTopics, selectedVoice, selectedMusicSuite]);
+  }, [selectedCountry, selectedContinent, selectedTimeframe, selectedTopics, selectedVoice, selectedMusicSuite, startPolling]);
+
+  // Handle story selection submission
+  const handleStorySelectionSubmit = useCallback(async (selection: { localStoryIds: string[]; continentStoryIds: string[] }) => {
+    if (!sessionId) return;
+    
+    try {
+      setIsSubmittingSelection(true);
+      await autogenAPI.submitStorySelection(sessionId, selection);
+      
+      // Clear the selection UI and resume polling
+      setResearchOutput(null);
+      setWorkflowState('running');
+      setGenerationStatus('Writing script...');
+      setGenerationProgress(30);
+      
+      startPolling(sessionId);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to submit selection');
+    } finally {
+      setIsSubmittingSelection(false);
+    }
+  }, [sessionId, startPolling]);
+
+  // Handle replacement selection submission
+  const handleReplacementSubmit = useCallback(async (selection: { selectedStoryId?: string; removeStory: boolean }) => {
+    if (!sessionId) return;
+    
+    try {
+      setIsSubmittingSelection(true);
+      await autogenAPI.submitReplacementSelection(sessionId, selection);
+      
+      // Clear the replacement UI and resume polling
+      setFailedStory(null);
+      setReplacementOptions(null);
+      setWorkflowState('running');
+      setGenerationStatus('Rewriting with replacement...');
+      setGenerationProgress(60);
+      
+      startPolling(sessionId);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to submit replacement');
+    } finally {
+      setIsSubmittingSelection(false);
+    }
+  }, [sessionId, startPolling]);
+
+  // Cancel/reset workflow
+  const handleCancelWorkflow = useCallback(() => {
+    stopPolling();
+    setIsGenerating(false);
+    setSessionId(null);
+    setWorkflowState(null);
+    setResearchOutput(null);
+    setFailedStory(null);
+    setReplacementOptions(null);
+    setGenerationStatus('');
+    setGenerationProgress(0);
+  }, [stopPolling]);
 
   // Copy prompt to clipboard
   const handleCopyPrompt = useCallback(async () => {
@@ -198,6 +327,28 @@ Generate the final podcast using generate_speech with voice ${config.voice.voice
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200">
       <Toaster position="top-right" theme="dark" />
+      
+      {/* Story Selector Modal */}
+      {researchOutput && workflowState === 'awaiting_selection' && (
+        <StorySelector
+          localStories={researchOutput.localStories}
+          continentStories={researchOutput.continentStories}
+          onSubmit={handleStorySelectionSubmit}
+          onCancel={handleCancelWorkflow}
+          isLoading={isSubmittingSelection}
+        />
+      )}
+
+      {/* Replacement Selector Modal */}
+      {failedStory && replacementOptions && workflowState === 'awaiting_replacement' && (
+        <ReplacementSelector
+          failedStory={failedStory}
+          alternatives={replacementOptions}
+          onSubmit={handleReplacementSubmit}
+          onCancel={handleCancelWorkflow}
+          isLoading={isSubmittingSelection}
+        />
+      )}
       
       {/* Header */}
       <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur">
@@ -425,6 +576,11 @@ Generate the final podcast using generate_speech with voice ${config.voice.voice
                     style={{ width: `${generationProgress}%` }}
                   />
                 </div>
+                {sessionId && (
+                  <p className="text-xs text-slate-500">
+                    Session: {sessionId.slice(0, 8)}...
+                  </p>
+                )}
               </div>
             )}
 

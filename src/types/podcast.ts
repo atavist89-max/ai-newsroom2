@@ -48,8 +48,46 @@ export interface PodcastConfig {
   date: string;
 }
 
+export interface Story {
+  id: string;
+  headline: string;
+  summary: string;
+  newsRating: number;
+  source: string;
+  originalLanguage: string;
+  section: 'local' | 'continent';
+  url?: string;
+  whyAlternative?: string;
+}
+
+export interface FailedStory {
+  storyId: string;
+  headline: string;
+  reason: string;
+}
+
+export interface ResearchOutput {
+  localStories: Story[];
+  continentStories: Story[];
+}
+
+export type WorkflowState = 'running' | 'awaiting_selection' | 'awaiting_replacement' | 'error' | 'complete' | 'timeout';
+
+export interface WorkflowStatus {
+  sessionId: string;
+  workflowState: WorkflowState;
+  currentStep: string;
+  progress: number;
+  researchOutput?: ResearchOutput;
+  failedStory?: FailedStory;
+  replacementOptions?: Story[];
+  error?: string;
+  mp3Url?: string;
+  filename?: string;
+}
+
 export interface GenerationStatus {
-  status: 'idle' | 'researching' | 'editing' | 'fact-checking' | 'producing' | 'completed' | 'error';
+  status: WorkflowState | 'idle' | 'researching' | 'editing' | 'fact-checking' | 'producing' | 'completed';
   progress: number;
   currentStep: string;
   message?: string;
@@ -61,11 +99,18 @@ export interface GenerationStatus {
     factCheckAttempts?: number;
     timestamp?: string;
   };
+  // Human-in-the-Loop fields
+  sessionId?: string;
+  workflowState?: WorkflowState;
+  researchOutput?: ResearchOutput;
+  failedStory?: FailedStory;
+  replacementOptions?: Story[];
 }
 
 export interface APIResponse {
   success: boolean;
   jobId?: string;
+  sessionId?: string;
   mp3Url?: string;
   filename?: string;
   script?: string;
@@ -82,4 +127,14 @@ export interface APIResponse {
   message?: string;
   reason?: string;
   violations?: string[];
+}
+
+export interface StorySelection {
+  localStoryIds: string[];
+  continentStoryIds: string[];
+}
+
+export interface ReplacementSelection {
+  selectedStoryId?: string;
+  removeStory: boolean;
 }
