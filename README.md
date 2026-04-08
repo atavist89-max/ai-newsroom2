@@ -477,7 +477,14 @@ curl -X POST http://localhost:8000/workflow/start \
 
 ## Changelog
 
-### v2.0 - Rigorous Editorial Workflow (Current)
+### v2.1 - Bug Fix: Replacement Selection (Current)
+- **Fixed**: `submit_replacement_selection()` now properly applies human-selected replacement stories
+- **Fixed**: Replacement stories are correctly written to `selected_stories.json`
+- **Fixed**: Workflow state properly resets after replacement (clears `first_draft_md`, `evaluation_json`, etc.)
+- **Fixed**: Writer regenerates script with new story after replacement selection
+- **Removed**: Unused `workflow_new.py` stub file
+
+### v2.0 - Rigorous Editorial Workflow
 - Complete rewrite with 2-phase editor review
 - 11 hard requirements with pass/fail logging
 - Rejection loops: Editor → Researcher, Editor → Writer

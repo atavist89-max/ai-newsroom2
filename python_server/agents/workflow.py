@@ -2080,13 +2080,48 @@ Generate all audio and assemble into final MP3."""
         selected_story_id: Optional[str],
         remove_story: bool
     ):
-        """Submit replacement selection and resume workflow."""
+        """Submit replacement selection and resume workflow.
+        
+        Applies the human-selected replacement story to the selected_stories_json,
+        clears dependent workflow state, and triggers a fresh Writer-Editor loop.
+        """
         session = get_session(session_id)
         if not session or session.state != WorkflowState.AWAITING_REPLACEMENT:
             raise ValueError("Session not found or not awaiting replacement")
         
-        # Apply replacement logic
-        # TODO: Actually apply the replacement/removal
+        failed_story_id = session.failed_story.storyId if session.failed_story else None
+        
+        if remove_story or not selected_story_id:
+            # Remove the failed story entirely
+            if failed_story_id:
+                self._remove_story_from_selection(session, failed_story_id)
+                print(f"[Workflow] Removed failed story {failed_story_id} from selection")
+        else:
+            # Apply the replacement
+            replacement = next(
+                (s for s in session.replacement_options if s.id == selected_story_id),
+                None
+            )
+            if not replacement:
+                raise ValueError(f"Selected replacement {selected_story_id} not found in options")
+            
+            if failed_story_id:
+                self._replace_story_in_selection(session, failed_story_id, replacement)
+                print(f"[Workflow] Replaced story {failed_story_id} with {selected_story_id}")
+        
+        # Clear workflow state for fresh Writer-Editor loop
+        # This ensures the Writer regenerates First_Draft.md with the new story
+        session.first_draft_md = None
+        session.editor_evaluation_json = None
+        session.editor_evaluation_passed = False
+        session.fact_check_json = None
+        session.fact_check_all_passed = False
+        session.writer_editor_loop_count = 0
+        
+        # Clear the failed story and replacement options
+        session.failed_story = None
+        session.replacement_options = None
+        
         session.state = WorkflowState.RUNNING
         session.current_step = "rewriting"
         session.progress = 60
@@ -2097,9 +2132,59 @@ Generate all audio and assemble into final MP3."""
             "step": "rewriting"
         })
         
-        # Continue workflow from final editor phase
+        # Continue workflow with fresh Writer-Editor loop
         print(f"[Workflow] Spawning background task to continue after replacement")
         asyncio.create_task(self._continue_workflow(session_id))
+    
+    def _replace_story_in_selection(
+        self, 
+        session: WorkflowSession, 
+        old_story_id: str, 
+        new_story: Story
+    ):
+        """Replace a story in selected_stories_json with a replacement story.
+        
+        Args:
+            session: The workflow session
+            old_story_id: ID of the story to replace
+            new_story: The replacement Story object
+        """
+        if not session.selected_stories_json:
+            return
+        
+        # Determine section from new_story
+        section_key = "local_stories" if new_story.section == "local" else "continent_stories"
+        
+        stories = session.selected_stories_json.get(section_key, [])
+        for i, story in enumerate(stories):
+            if story.get("id") == old_story_id:
+                # Replace with new story data
+                stories[i] = {
+                    "id": new_story.id,
+                    "headline": new_story.headline,
+                    "summary": new_story.summary,
+                    "website": new_story.source,
+                    "news_topic": new_story.section,
+                    "news_rating": new_story.newsRating,
+                    "original_language": new_story.originalLanguage
+                }
+                break
+    
+    def _remove_story_from_selection(self, session: WorkflowSession, story_id: str):
+        """Remove a story from selected_stories_json.
+        
+        Args:
+            session: The workflow session
+            story_id: ID of the story to remove
+        """
+        if not session.selected_stories_json:
+            return
+        
+        for section_key in ["local_stories", "continent_stories"]:
+            stories = session.selected_stories_json.get(section_key, [])
+            session.selected_stories_json[section_key] = [
+                s for s in stories if s.get("id") != story_id
+            ]
     
     def stop(self):
         """Signal the workflow to stop."""
