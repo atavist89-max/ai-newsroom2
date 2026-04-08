@@ -477,7 +477,14 @@ curl -X POST http://localhost:8000/workflow/start \
 
 ## Changelog
 
-### v2.1 - Bug Fix: Replacement Selection (Current)
+### v2.2 - Fact Checker Logic Improvement (Current)
+- **Fixed**: Fact checker now properly distinguishes between correctable vs severe issues
+- **New**: Stories with minor errors go to Writer for correction (with supplemental sources)
+- **New**: Replacement only triggered for severe issues (hallucination, wrong topic, too old)
+- **New**: Detailed justification required for replacement (must specify severe_issues)
+- **Fixed**: Vite proxy config to forward API requests correctly
+
+### v2.1 - Bug Fix: Replacement Selection
 - **Fixed**: `submit_replacement_selection()` now properly applies human-selected replacement stories
 - **Fixed**: Replacement stories are correctly written to `selected_stories.json`
 - **Fixed**: Workflow state properly resets after replacement (clears `first_draft_md`, `evaluation_json`, etc.)
