@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Toaster, toast } from 'sonner';
-import { Mic2, Music, Globe, Clock, FileText, Copy, Check, Radio, Newspaper, Loader2, Download } from 'lucide-react';
+import { Mic2, Music, Globe, Clock, FileText, Copy, Check, Radio, Newspaper, Loader2, Download, Play, Pause } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { countries, continents } from './data/countries';
@@ -29,6 +29,11 @@ function App() {
   const [selectedVoice, setSelectedVoice] = useState<Voice>(voices[0]);
   const [selectedMusicSuite] = useState<MusicSuite>(musicSuites[0]);
   const [copied, setCopied] = useState(false);
+  
+  // Audio preview states
+  const [playingVoice, setPlayingVoice] = useState<string | null>(null);
+  const [playingMusic, setPlayingMusic] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // Generation states
   const [isGenerating, setIsGenerating] = useState(false);
@@ -257,6 +262,86 @@ function App() {
     setGenerationProgress(0);
   }, [stopPolling]);
 
+  // Play voice sample
+  const playVoiceSample = useCallback((voiceId: string) => {
+    // Stop current audio if playing
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    
+    // If clicking same voice, just stop
+    if (playingVoice === voiceId) {
+      setPlayingVoice(null);
+      return;
+    }
+    
+    // Play new voice sample
+    const audio = new Audio(`/ai-newsroom/audio/voices/${voiceId}.mp3`);
+    audioRef.current = audio;
+    
+    audio.addEventListener('ended', () => {
+      setPlayingVoice(null);
+    });
+    
+    audio.addEventListener('error', () => {
+      toast.error(`Could not play voice sample for ${voiceId}`);
+      setPlayingVoice(null);
+    });
+    
+    audio.play().then(() => {
+      setPlayingVoice(voiceId);
+    }).catch(() => {
+      toast.error(`Could not play voice sample for ${voiceId}`);
+      setPlayingVoice(null);
+    });
+  }, [playingVoice]);
+
+  // Play music sample
+  const playMusicSample = useCallback((type: string, style: string) => {
+    // Stop current audio if playing
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    
+    const musicKey = `${type}_${style}`;
+    
+    // If clicking same music, just stop
+    if (playingMusic === musicKey) {
+      setPlayingMusic(null);
+      return;
+    }
+    
+    // Map type to file prefix
+    const typeMap: Record<string, string> = {
+      'intro': 'intro',
+      'outro': 'outro',
+      'story': 'story',
+      'block': 'block'
+    };
+    
+    const fileName = `${typeMap[type]}_${style}.mp3`;
+    const audio = new Audio(`/ai-newsroom/audio/${fileName}`);
+    audioRef.current = audio;
+    
+    audio.addEventListener('ended', () => {
+      setPlayingMusic(null);
+    });
+    
+    audio.addEventListener('error', () => {
+      toast.error(`Could not play music sample`);
+      setPlayingMusic(null);
+    });
+    
+    audio.play().then(() => {
+      setPlayingMusic(musicKey);
+    }).catch(() => {
+      toast.error(`Could not play music sample`);
+      setPlayingMusic(null);
+    });
+  }, [playingMusic]);
+
   // Copy prompt to clipboard
   const handleCopyPrompt = useCallback(async () => {
     try {
@@ -463,36 +548,58 @@ Generate the final podcast using generate_speech with voice ${config.voice.voice
             {/* Voice Selection */}
             <Section icon={Mic2} title="Voice Selection">
               <div className="space-y-2">
-                {voices.map(voice => (
-                  <button
-                    key={voice.id}
-                    onClick={() => setSelectedVoice(voice)}
-                    className={cn(
-                      "w-full flex items-center gap-3 p-3 rounded-lg border transition-all text-left",
-                      selectedVoice.id === voice.id
-                        ? "bg-blue-900/30 border-blue-500"
-                        : "bg-slate-800 border-slate-700 hover:bg-slate-750"
-                    )}
-                  >
-                    <div className={cn(
-                      "w-10 h-10 rounded-full flex items-center justify-center",
-                      selectedVoice.id === voice.id ? "bg-blue-500/20" : "bg-slate-700"
-                    )}>
-                      <Mic2 className={cn("w-5 h-5", selectedVoice.id === voice.id ? "text-blue-400" : "text-slate-400")} />
+                {voices.map(voice => {
+                  const isPlaying = playingVoice === voice.id;
+                  return (
+                    <div
+                      key={voice.id}
+                      className={cn(
+                        "w-full flex items-center gap-3 p-3 rounded-lg border transition-all",
+                        selectedVoice.id === voice.id
+                          ? "bg-blue-900/30 border-blue-500"
+                          : "bg-slate-800 border-slate-700"
+                      )}
+                    >
+                      <button
+                        onClick={() => setSelectedVoice(voice)}
+                        className="flex-1 flex items-center gap-3 text-left"
+                      >
+                        <div className={cn(
+                          "w-10 h-10 rounded-full flex items-center justify-center",
+                          selectedVoice.id === voice.id ? "bg-blue-500/20" : "bg-slate-700"
+                        )}>
+                          <Mic2 className={cn("w-5 h-5", selectedVoice.id === voice.id ? "text-blue-400" : "text-slate-400")} />
+                        </div>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className={cn("font-medium", selectedVoice.id === voice.id ? "text-white" : "text-slate-300")}>
+                              {voice.label}
+                            </span>
+                            <span className="text-xs text-slate-500">
+                              {voice.gender === 'male' ? '♂' : '♀'} {voice.accent}
+                            </span>
+                          </div>
+                          <p className="text-sm text-slate-400">{voice.description}</p>
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          playVoiceSample(voice.id);
+                        }}
+                        className={cn(
+                          "p-2 rounded-full transition-all",
+                          isPlaying
+                            ? "bg-blue-500 text-white"
+                            : "bg-slate-700 text-slate-400 hover:bg-slate-600"
+                        )}
+                        title={`Play ${voice.label} sample`}
+                      >
+                        {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                      </button>
                     </div>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className={cn("font-medium", selectedVoice.id === voice.id ? "text-white" : "text-slate-300")}>
-                          {voice.label}
-                        </span>
-                        <span className="text-xs text-slate-500">
-                          {voice.gender === 'male' ? '♂' : '♀'} {voice.accent}
-                        </span>
-                      </div>
-                      <p className="text-sm text-slate-400">{voice.description}</p>
-                    </div>
-                  </button>
-                ))}
+                  );
+                })}
               </div>
             </Section>
 
@@ -500,28 +607,47 @@ Generate the final podcast using generate_speech with voice ${config.voice.voice
             <Section icon={Music} title="Music Suite">
               <div className="space-y-3">
                 {[
-                  { key: 'intro', label: 'Intro Music' },
-                  { key: 'outro', label: 'Outro Music' },
-                  { key: 'storySting', label: 'Story Sting' },
-                  { key: 'blockSting', label: 'Block Transition' }
-                ].map(slot => (
-                  <div key={slot.key} className="bg-slate-800 border border-slate-700 rounded-lg p-3">
-                    <div className="text-sm font-medium text-slate-300 mb-2">{slot.label}</div>
-                    <select
-                      value={(selectedMusicSuite[slot.key as keyof MusicSuite] as { id: string }).id}
-                      onChange={() => {
-                        // Simplified - would need proper state management
-                      }}
-                      className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm"
-                    >
-                      <option value="orch_a">Orchestral A</option>
-                      <option value="modern_b">Modern B</option>
-                      <option value="nordic_c">Nordic C</option>
-                      <option value="bbc_d">BBC Style</option>
-                      <option value="contemp_e">Contemporary E</option>
-                    </select>
-                  </div>
-                ))}
+                  { key: 'intro', label: 'Intro Music', type: 'intro' },
+                  { key: 'outro', label: 'Outro Music', type: 'outro' },
+                  { key: 'storySting', label: 'Story Sting', type: 'story' },
+                  { key: 'blockSting', label: 'Block Transition', type: 'block' }
+                ].map(slot => {
+                  const musicStyle = (selectedMusicSuite[slot.key as keyof MusicSuite] as { id: string }).id;
+                  const musicKey = `${slot.type}_${musicStyle}`;
+                  const isPlaying = playingMusic === musicKey;
+                  return (
+                    <div key={slot.key} className="bg-slate-800 border border-slate-700 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-slate-300">{slot.label}</span>
+                        <button
+                          onClick={() => playMusicSample(slot.type, musicStyle)}
+                          className={cn(
+                            "p-1.5 rounded-full transition-all",
+                            isPlaying
+                              ? "bg-blue-500 text-white"
+                              : "bg-slate-700 text-slate-400 hover:bg-slate-600"
+                          )}
+                          title={`Play ${slot.label}`}
+                        >
+                          {isPlaying ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                        </button>
+                      </div>
+                      <select
+                        value={musicStyle}
+                        onChange={() => {
+                          // Simplified - would need proper state management
+                        }}
+                        className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm"
+                      >
+                        <option value="orch_a">Orchestral A</option>
+                        <option value="modern_b">Modern B</option>
+                        <option value="nordic_c">Nordic C</option>
+                        <option value="bbc_d">BBC Style</option>
+                        <option value="contemp_e">Contemporary E</option>
+                      </select>
+                    </div>
+                  );
+                })}
               </div>
             </Section>
           </div>

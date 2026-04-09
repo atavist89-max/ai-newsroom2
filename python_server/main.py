@@ -105,8 +105,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files for audio output
+# Mount static files for audio output and assets
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
+app.mount("/ai-newsroom/audio", StaticFiles(directory="/workspaces/autogen-newsroom/ai-newsroom/audio"), name="audio")
 
 # Socket.IO ASGI app
 asgi_app = socketio.ASGIApp(sio, app)
@@ -230,7 +231,7 @@ async def start_workflow(config: PodcastConfig):
     import uuid
     
     session_id = str(uuid.uuid4())
-    print(f"[API] Starting workflow {session_id}")
+    print(f"[DEBUG API /workflow/start] Starting NEW workflow {session_id}")
     
     # Get orchestrator and start workflow in background
     orchestrator = get_orchestrator()
@@ -286,10 +287,14 @@ async def get_workflow_status(session_id: str):
 @app.post("/workflow/{session_id}/select")
 async def submit_story_selection(session_id: str, selection: StorySelection):
     """Submit story selection to resume workflow."""
+    print(f"[DEBUG API /workflow/select] Called for session {session_id}")
     session = get_session(session_id)
     
     if not session:
+        print(f"[DEBUG API /workflow/select] Session {session_id} NOT FOUND")
         raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    print(f"[DEBUG API /workflow/select] Session found: state={session.state}, research_output={'PRESENT' if session.research_output else 'MISSING'}")
     
     if session.state != WorkflowState.AWAITING_SELECTION:
         raise HTTPException(status_code=400, detail="Workflow is not awaiting story selection")
@@ -302,6 +307,8 @@ async def submit_story_selection(session_id: str, selection: StorySelection):
     if len(selection.continentStoryIds) != 3:
         raise HTTPException(status_code=400, detail="Must select exactly 3 continent stories")
     
+    print(f"[DEBUG API /workflow/select] Submitting selection: {len(selection.localStoryIds)} local, {len(selection.continentStoryIds)} continent")
+    
     # Submit selection and resume
     await orchestrator.submit_story_selection(
         session_id,
@@ -309,6 +316,7 @@ async def submit_story_selection(session_id: str, selection: StorySelection):
         selection.continentStoryIds
     )
     
+    print(f"[DEBUG API /workflow/select] Selection submitted successfully for {session_id}")
     return {"success": True, "message": "Story selection submitted"}
 
 
@@ -337,10 +345,14 @@ async def submit_replacement_selection(session_id: str, selection: ReplacementSe
 @app.post("/workflow/{session_id}/resume")
 async def resume_workflow(session_id: str):
     """Resume a paused workflow."""
+    print(f"[DEBUG API /workflow/resume] Called for session {session_id}")
     session = get_session(session_id)
     
     if not session:
+        print(f"[DEBUG API /workflow/resume] Session {session_id} NOT FOUND")
         raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    print(f"[DEBUG API /workflow/resume] Session found: state={session.state}, research_output={'PRESENT' if session.research_output else 'MISSING'}, user_selection={'PRESENT' if session.user_selection else 'MISSING'}")
     
     if session.state not in [WorkflowState.AWAITING_SELECTION, WorkflowState.AWAITING_REPLACEMENT]:
         raise HTTPException(status_code=400, detail="Workflow is not paused")
@@ -352,6 +364,7 @@ async def resume_workflow(session_id: str):
         # This shouldn't happen - selection should be submitted first
         raise HTTPException(status_code=400, detail="Please submit story selection first")
     
+    print(f"[DEBUG API /workflow/resume] Spawning run_workflow for {session_id}")
     # Resume workflow in background
     asyncio.create_task(
         orchestrator.run_workflow(session_id, {})  # Config will be loaded from session

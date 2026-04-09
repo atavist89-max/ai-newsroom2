@@ -30,6 +30,10 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      '/ai-newsroom': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
   resolve: {

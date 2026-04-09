@@ -362,10 +362,16 @@ class WorkflowOrchestrator:
                 for msg in result.messages:
                     if hasattr(msg, 'content') and msg.content:
                         from models.state import AgentOutput
+                        # Handle case where content is a list (e.g., tool calls)
+                        content = msg.content
+                        if isinstance(content, list):
+                            content = str(content)
+                        elif not isinstance(content, str):
+                            content = str(content)
                         session.agent_outputs[agent_name].append(
                             AgentOutput(
                                 role=getattr(msg, 'role', 'assistant'),
-                                content=msg.content[:50000],  # Limit size to 50KB
+                                content=content[:50000],  # Limit size to 50KB
                                 timestamp=datetime.now().isoformat()
                             )
                         )
@@ -470,6 +476,7 @@ class WorkflowOrchestrator:
         """Run the complete podcast production workflow."""
         # Create or get session
         session = get_session(session_id)
+        is_new_session = session is None
         if not session:
             session = WorkflowSession(
                 session_id=session_id,
@@ -477,10 +484,14 @@ class WorkflowOrchestrator:
                 config=config  # Store config for continuation
             )
             save_session(session)
+            print(f"[DEBUG run_workflow] Created NEW session {session_id}")
         else:
             # Update config in case it changed
             session.config = config
             save_session(session)
+            print(f"[DEBUG run_workflow] Using EXISTING session {session_id}")
+        
+        print(f"[DEBUG run_workflow] Session state: state={session.state}, research_output={'PRESENT' if session.research_output else 'MISSING'}, user_selection={'PRESENT' if session.user_selection else 'MISSING'}")
         
         try:
             await self._emit_and_log(
@@ -493,14 +504,48 @@ class WorkflowOrchestrator:
                 message="🎬 Workflow started"
             )
             
-            # Step 1: News Research
-            await self._run_research_phase(session, config)
+            # Step 1: News Research (skip if already done)
+            if not session.research_output:
+                await self._run_research_phase(session, config)
+                
+                # Check if stopped or error
+                if self._stop_event.is_set():
+                    return
+                
+                # Check if research failed
+                if session.state == WorkflowState.ERROR:
+                    print(f"[DEBUG run_workflow] Research phase failed, stopping workflow")
+                    return
+                
+                # Check if awaiting selection after research
+                if session.state == WorkflowState.AWAITING_SELECTION:
+                    await self._emit_and_log(
+                        session,
+                        "workflow_paused",
+                        {
+                            "session_id": session_id,
+                            "reason": "awaiting_selection",
+                            "data": {
+                                "localStories": [s.model_dump() for s in session.research_output.get("localStories", [])],
+                                "continentStories": [s.model_dump() for s in session.research_output.get("continentStories", [])]
+                            }
+                        },
+                        message=f"⏸️ Paused: Awaiting story selection ({len(session.research_output.get('localStories', []))} local, {len(session.research_output.get('continentStories', []))} continent stories)"
+                    )
+                    return  # Will be resumed by external call via submit_story_selection
+            else:
+                print(f"[Workflow] Skipping research phase - research_output already exists")
+                await self._emit_and_log(
+                    session,
+                    "workflow_resumed",
+                    {
+                        "session_id": session_id,
+                        "step": session.current_step
+                    },
+                    message=f"🔄 Resuming workflow from step: {session.current_step}"
+                )
             
-            # Check if stopped
-            if self._stop_event.is_set():
-                return
-            
-            # Wait for human story selection
+            # Wait for human story selection (if still in that state)
             if session.state == WorkflowState.AWAITING_SELECTION:
                 await self._emit_and_log(
                     session,
@@ -596,6 +641,7 @@ class WorkflowOrchestrator:
         """Run the news research phase using the actual news_researcher agent."""
         from datetime import datetime
         
+        print(f"[DEBUG _run_research_phase] Starting research for session {session.session_id}")
         session.current_step = "researching"
         session.progress = 10
         save_session(session)
@@ -625,11 +671,46 @@ Local News Sources: {', '.join(config['country']['newsSources'])}
 Continent: {config['continent']['name']}
 Continent Sources: {', '.join([s['name'] for s in config['continent']['newsSources']])}
 
-Search for at least 10 local stories and 5 continent stories.
-Use the search_web tool to find REAL news stories - do NOT generate fake stories.
-Translate all content to English.
-Output as JSON with localStories and continentStories arrays.
-Each story should have: id, headline, summary, newsRating (1-10), source, originalLanguage, section, url."""
+INSTRUCTIONS:
+1. Use search_web tool to search for news (e.g., "{config['country']['name']} news today")
+2. AFTER getting search results, you MUST transform them into the REQUIRED JSON format below
+3. Do NOT return raw search results - extract and format the stories properly
+4. Translate all content to English
+
+REQUIRED OUTPUT FORMAT (STRICT JSON - NO markdown, NO extra text):
+{{
+  "localStories": [
+    {{
+      "id": "local_1",
+      "headline": "Story headline in English",
+      "summary": "2-3 sentence summary in English",
+      "newsRating": 8,
+      "source": "BBC",
+      "originalLanguage": "{config['country']['language']}",
+      "section": "local",
+      "url": "https://example.com/story"
+    }}
+  ],
+  "continentStories": [
+    {{
+      "id": "continent_1", 
+      "headline": "Story headline in English",
+      "summary": "2-3 sentence summary in English",
+      "newsRating": 7,
+      "source": "Reuters",
+      "originalLanguage": "English",
+      "section": "continent",
+      "url": "https://example.com/story"
+    }}
+  ]
+}}
+
+REQUIREMENTS:
+- At least 10 local stories from {config['country']['name']}
+- At least 5 continent stories from {config['continent']['name']}
+- Use REAL URLs from search results
+- All content in English
+- Return ONLY the JSON object, no other text"""
 
             await self._agent_working(
                 session, "news_researcher",
@@ -648,15 +729,44 @@ Each story should have: id, headline, summary, newsRating (1-10), source, origin
             
             # Parse the response to extract stories
             output_text = ""
+            print(f"[DEBUG] result type: {type(result)}, has messages: {hasattr(result, 'messages')}")
             if result.messages:
+                print(f"[DEBUG] Number of messages: {len(result.messages)}")
+                for i, msg in enumerate(result.messages):
+                    content = getattr(msg, 'content', None)
+                    content_type = type(content) if content is not None else 'no content'
+                    source = getattr(msg, 'source', 'unknown')
+                    print(f"[DEBUG] Message {i}: source={source}, content_type={content_type}")
+                    if content:
+                        content_str = str(content) if not isinstance(content, str) else content
+                        print(f"[DEBUG] Message {i} content preview: {content_str[:300]}")
+                
+                # Find the message with the JSON output (contains localStories)
                 for msg in reversed(result.messages):
-                    if hasattr(msg, 'content') and msg.source == 'news_researcher':
-                        output_text = msg.content
-                        break
+                    if hasattr(msg, 'content') and msg.content and msg.source == 'news_researcher':
+                        content_str = str(msg.content) if not isinstance(msg.content, str) else msg.content
+                        # Look for the message containing localStories
+                        if 'localStories' in content_str or 'title' in content_str:
+                            output_text = content_str
+                            print(f"[DEBUG] Selected message with localStories/title, length={len(output_text)}")
+                            break
+                
+                # Fallback: use last string message from news_researcher
+                if not output_text:
+                    for msg in reversed(result.messages):
+                        if hasattr(msg, 'content') and msg.content and msg.source == 'news_researcher':
+                            if isinstance(msg.content, str):
+                                output_text = msg.content
+                                print(f"[DEBUG] Fallback: selected last string message, length={len(output_text)}")
+                                break
             
             await self._agent_parsing_result(session, "news_researcher", f"Got {len(output_text)} chars of output")
             
             # Try to extract JSON from the response
+            local_stories = []
+            continent_stories = []
+            parsed = False
+            
             try:
                 # Look for JSON in the response
                 import re
@@ -664,8 +774,8 @@ Each story should have: id, headline, summary, newsRating (1-10), source, origin
                 if json_match:
                     json_str = json_match.group(1)
                 else:
-                    # Try to find raw JSON object
-                    json_match = re.search(r'\{[\s\S]*"localStories"[\s\S]*\}', output_text)
+                    # Try to find raw JSON object with localStories
+                    json_match = re.search(r'\{[\s\S]*?"localStories"[\s\S]*?\}', output_text)
                     if json_match:
                         json_str = json_match.group(0)
                     else:
@@ -673,18 +783,60 @@ Each story should have: id, headline, summary, newsRating (1-10), source, origin
                 
                 data = json.loads(json_str)
                 
-                # Convert to Story objects
-                local_stories = [
-                    Story(**story) for story in data.get("localStories", [])
-                ]
-                continent_stories = [
-                    Story(**story) for story in data.get("continentStories", [])
-                ]
-                
-            except (json.JSONDecodeError, Exception) as e:
-                error_msg = f"Failed to parse agent output: {str(e)}"
+                # Check if it's in expected format
+                if "localStories" in data and "continentStories" in data:
+                    local_stories = [Story(**story) for story in data.get("localStories", [])]
+                    continent_stories = [Story(**story) for story in data.get("continentStories", [])]
+                    parsed = True
+                    print(f"[DEBUG] Parsed expected format: {len(local_stories)} local, {len(continent_stories)} continent")
+            except Exception as e:
+                print(f"[DEBUG] Could not parse expected format: {e}")
+            
+            # If not parsed, try to extract from search results format
+            if not parsed:
+                try:
+                    # Extract just the first JSON array from the text
+                    import re
+                    # Find the first complete JSON array
+                    array_match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', output_text)
+                    if array_match:
+                        json_str = array_match.group(0)
+                        search_results = json.loads(json_str)
+                        if isinstance(search_results, list):
+                            print(f"[DEBUG] Parsing search results format: {len(search_results)} items")
+                            stories = []
+                            for i, item in enumerate(search_results[:15]):  # Limit to 15 stories
+                                story = Story(
+                                    id=f"local_{i+1}",
+                                    headline=item.get("title", "Unknown"),
+                                    summary=item.get("snippet", "")[:200],
+                                    newsRating=5,
+                                    source=item.get("source", "Unknown"),
+                                    originalLanguage="English",
+                                    section="local",
+                                    url=item.get("link", "")
+                                )
+                                stories.append(story)
+                            
+                            # Split between local and continent (first 10 local, rest continent)
+                            local_stories = stories[:10]
+                            continent_stories = stories[10:13] if len(stories) > 10 else []
+                            # Mark remaining as continent
+                            for s in continent_stories:
+                                s.section = "continent"
+                                s.id = s.id.replace("local_", "continent_")
+                            
+                            parsed = True
+                            print(f"[DEBUG] Parsed search results: {len(local_stories)} local, {len(continent_stories)} continent")
+                    else:
+                        print(f"[DEBUG] Could not find JSON array in output")
+                except Exception as e2:
+                    print(f"[DEBUG] Could not parse search results format: {e2}")
+            
+            if not parsed or (not local_stories and not continent_stories):
+                error_msg = "Failed to parse agent output into stories"
                 print(f"[Workflow] {error_msg}")
-                print(f"[Workflow] Raw output: {output_text[:500]}")
+                print(f"[Workflow] Raw output (first 2000 chars): {output_text[:2000]}")
                 await self._agent_error(session, "news_researcher", error_msg)
                 session.state = WorkflowState.ERROR
                 session.error = error_msg
@@ -695,6 +847,7 @@ Each story should have: id, headline, summary, newsRating (1-10), source, origin
                 "localStories": local_stories,
                 "continentStories": continent_stories
             }
+            print(f"[DEBUG _run_research_phase] SUCCESS - Set research_output: {len(local_stories)} local, {len(continent_stories)} continent stories")
             
             await self._agent_completed(
                 session, "news_researcher",
@@ -703,7 +856,7 @@ Each story should have: id, headline, summary, newsRating (1-10), source, origin
             
         except Exception as e:
             error_msg = f"Research failed: {str(e)}"
-            print(f"[Workflow] {error_msg}")
+            print(f"[DEBUG _run_research_phase] FAILED with exception: {error_msg}")
             await self._agent_error(session, "news_researcher", error_msg)
             session.state = WorkflowState.ERROR
             session.error = error_msg
@@ -715,6 +868,7 @@ Each story should have: id, headline, summary, newsRating (1-10), source, origin
         session.current_step = "awaiting_story_selection"
         session.progress = 20
         save_session(session)
+        print(f"[DEBUG _run_research_phase] PAUSED for selection, research_output={'PRESENT' if session.research_output else 'MISSING'}")
     
     async def _run_editor_phase(self, session: WorkflowSession, config: Dict[str, Any]):
         """Wrapper for _run_editor_phase1 (legacy compatibility)."""
@@ -726,6 +880,8 @@ Each story should have: id, headline, summary, newsRating (1-10), source, origin
         This is STEP 2 of the execution workflow.
         Can REJECT and send back to Researcher (Agent 1).
         """
+        print(f"[DEBUG _run_editor_phase1] ENTER - session {session.session_id}, research_output={'PRESENT' if session.research_output else 'MISSING'}, user_selection={'PRESENT' if session.user_selection else 'MISSING'}")
+        
         await self._agent_started(session, "editor", "PHASE 1: Initial BBC Standards Review")
         
         # Log Phase 1 header
@@ -734,6 +890,7 @@ Each story should have: id, headline, summary, newsRating (1-10), source, origin
         try:
             if not session.research_output:
                 error_msg = "Cannot run editor: research_output is missing"
+                print(f"[DEBUG _run_editor_phase1] ERROR: {error_msg}")
                 await self._agent_error(session, "editor", error_msg)
                 session.state = WorkflowState.ERROR
                 session.error = error_msg
@@ -1134,20 +1291,13 @@ Find 3-5 alternative stories on the SAME topic. Return as JSON."""
             except (json.JSONDecodeError, Exception) as e:
                 await self._agent_parsing_result(session, "recovery_researcher", f"Parse error: {str(e)[:50]}")
                 print(f"[Workflow] Error parsing recovery output: {e}")
-                # Fallback to mock alternatives
-                session.replacement_options = [
-                    Story(
-                        id=f"alt_{i}",
-                        headline=f"Alternative {i+1} for {session.failed_story.headline[:30]}...",
-                        summary=f"Alternative story on similar topic from {config['country']['name']}.",
-                        newsRating=7,
-                        source=config['country']['newsSources'][0] if config['country']['newsSources'] else "Local News",
-                        originalLanguage=config['country']['language'],
-                        section="local"
-                    )
-                    for i in range(3)
-                ]
-                await self._agent_completed(session, "recovery_researcher", "Found alternatives (fallback)")
+                # ERROR: Do not create mock alternatives - fail instead
+                error_msg = f"Could not find alternative stories for '{session.failed_story.headline[:50]}...'"
+                await self._agent_error(session, "recovery_researcher", error_msg)
+                session.state = WorkflowState.ERROR
+                session.error = error_msg
+                save_session(session)
+                return
                 
         except Exception as e:
             print(f"[Workflow] Error in recovery phase: {e}")
@@ -2011,42 +2161,58 @@ Generate all audio and assemble into final MP3."""
             
             await self._agent_parsing_result(session, "audio_producer", f"Output: {filename}")
             
-            # Actually create the MP3 file (placeholder using existing audio)
-            import shutil
+            # Actually create the MP3 file with real TTS
             import os
             output_dir = "/workspaces/autogen-newsroom/output"
             os.makedirs(output_dir, exist_ok=True)
             output_path = os.path.join(output_dir, filename)
             
-            # Use a placeholder MP3 file (copy from existing audio assets)
-            placeholder_mp3 = "/workspaces/ai-newsroom2/ai-newsroom/audio/voices/adam.mp3"
-            if os.path.exists(placeholder_mp3):
-                shutil.copy(placeholder_mp3, output_path)
-                print(f"[Workflow] Created MP3 file: {output_path}")
-                await self._agent_working(session, "audio_producer", f"Saved MP3 to {output_path}", 100)
-            else:
-                print(f"[Workflow] Warning: Placeholder MP3 not found at {placeholder_mp3}")
+            # Generate real TTS audio with Piper
+            await self._agent_working(session, "audio_producer", "Generating speech with Piper TTS...", 60)
+            
+            # Import podcast audio generator
+            from services.podcast_audio_generator import generate_podcast_audio
+            
+            # Get voice and music config
+            voice_id = config.get('voice', {}).get('id', 'adam')
+            music_intro = config.get('music', {}).get('intro', {})
+            music_style = 'orch_a'  # Default
+            
+            # Map music description to style ID
+            music_desc = music_intro.get('description', '').lower()
+            if 'modern' in music_desc:
+                music_style = 'modern_b'
+            elif 'bbc' in music_desc:
+                music_style = 'bbc_d'
+            elif 'contemporary' in music_desc:
+                music_style = 'contemp_e'
+            elif 'nordic' in music_desc:
+                music_style = 'nordic_c'
+            
+            # Generate podcast audio
+            success = generate_podcast_audio(
+                script=session.final_script,
+                voice_id=voice_id,
+                music_style=music_style,
+                output_path=output_path
+            )
+            
+            if not success:
+                raise RuntimeError("Failed to generate podcast audio")
+            
+            session.mp3_url = f"/output/{filename}"
+            session.filename = filename
+            
+            await self._agent_parsing_result(session, "audio_producer", f"Output: {filename}")
             
             await self._agent_completed(session, "audio_producer", f"Audio generated: {filename}")
             
         except Exception as e:
             print(f"[Workflow] Error in audio phase: {e}")
             await self._agent_error(session, "audio_producer", str(e))
-            # Fallback: create MP3 even on error so user has something to download
-            import shutil
-            import os
-            filename = f"{config['country']['name'].replace(' ', '_')}_{config['timeframe']['label'].replace(' ', '_')}_{config['date']}.mp3"
-            output_dir = "/workspaces/autogen-newsroom/output"
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, filename)
-            placeholder_mp3 = "/workspaces/ai-newsroom2/ai-newsroom/audio/voices/adam.mp3"
-            if os.path.exists(placeholder_mp3):
-                shutil.copy(placeholder_mp3, output_path)
-                print(f"[Workflow] Created fallback MP3: {output_path}")
-            session.mp3_url = f"/output/{filename}"
-            session.filename = filename
+            # ERROR: Do not create placeholder MP3 - fail instead
             session.state = WorkflowState.ERROR
-            session.error = str(e)
+            session.error = f"Audio generation failed: {str(e)}"
             save_session(session)
             return
     
@@ -2066,19 +2232,23 @@ Generate all audio and assemble into final MP3."""
         7. Audio Producer → MP3
         """
         session = get_session(session_id)
+        print(f"[DEBUG _continue_workflow] ENTER - session_id={session_id}, session_exists={session is not None}")
+        
         if not session or not session.config:
-            print(f"[Workflow] Cannot continue: session or config missing")
+            print(f"[DEBUG _continue_workflow] Cannot continue: session or config missing")
             return
         
         if session.state == WorkflowState.ERROR:
-            print(f"[Workflow] Cannot continue: session is in ERROR state")
+            print(f"[DEBUG _continue_workflow] Cannot continue: session is in ERROR state")
             return
         
         config = session.config
         max_loops = 3
         
+        print(f"[DEBUG _continue_workflow] State check: research_output={'PRESENT' if session.research_output else 'MISSING'}, user_selection={'PRESENT' if session.user_selection else 'MISSING'}")
+        
         try:
-            print(f"[Workflow] Continuing workflow for session {session_id}")
+            print(f"[DEBUG _continue_workflow] Starting execution for session {session_id}")
             
             # ============================================================
             # STEP 1: Ensure selected_stories.json exists
@@ -2303,9 +2473,13 @@ Generate all audio and assemble into final MP3."""
         continent_story_ids: List[str]
     ):
         """Submit user story selection and resume workflow."""
+        print(f"[DEBUG submit_story_selection] ENTER - session_id={session_id}")
         session = get_session(session_id)
         if not session or session.state != WorkflowState.AWAITING_SELECTION:
+            print(f"[DEBUG submit_story_selection] ERROR: Session not found or not awaiting selection")
             raise ValueError("Session not found or not awaiting selection")
+        
+        print(f"[DEBUG submit_story_selection] Session OK: research_output={'PRESENT' if session.research_output else 'MISSING'}")
         
         session.user_selection = {
             "localStoryIds": local_story_ids,
@@ -2316,6 +2490,8 @@ Generate all audio and assemble into final MP3."""
         session.progress = 30
         save_session(session)
         
+        print(f"[DEBUG submit_story_selection] Saved user_selection, spawning _continue_workflow")
+        
         await self.emit("workflow_resumed", {
             "session_id": session_id,
             "step": "writing"
@@ -2323,7 +2499,7 @@ Generate all audio and assemble into final MP3."""
         
         # Spawn background task to continue workflow
         # This follows AutoGen v0.4 pattern for background event handling
-        print(f"[Workflow] Spawning background task to continue workflow")
+        print(f"[DEBUG submit_story_selection] Spawning background task _continue_workflow for {session_id}")
         asyncio.create_task(self._continue_workflow(session_id))
     
     async def submit_replacement_selection(

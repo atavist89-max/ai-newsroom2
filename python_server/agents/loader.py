@@ -109,7 +109,7 @@ class AgentLoader:
             model_client=self.client,
             description=config.get("description", ""),
             tools=tools,
-            reflect_on_tool_use=True,  # Enable tool result reflection
+            reflect_on_tool_use=False,  # Disable to avoid Kimi API thinking/reasoning_content errors
         )
     
     def load_all_agents(self) -> Dict[str, AssistantAgent]:

@@ -20,7 +20,7 @@ async def search_web(query: str, num_results: int = 10) -> str:
         JSON string with search results
     """
     # DuckDuckGo (free, no API key)
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
 
     with DDGS() as ddgs:
         results = list(ddgs.text(query, max_results=min(num_results, 20)))

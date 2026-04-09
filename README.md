@@ -6,10 +6,18 @@ A fully-automated, multi-agent podcast production system that researches real ne
 
 ## What's New
 
-- **🔍 Real Web Search**: Agents now use DuckDuckGo to find actual news (no more generated fake stories!)
+### v3.0 - Real TTS Audio & Voice/Music Preview
+- **🎙️ Real Text-to-Speech**: Piper TTS integration generates actual spoken audio (not placeholder!)
+- **🔊 Voice Preview**: Click play button to hear voice samples before generating
+- **🎵 Music Preview**: Preview intro, outro, and stings before selecting music suite
+- **🚫 No Synthetic Fallbacks**: Removed all placeholder/fallback data - errors are shown instead
+- **🎛️ Full Music Mixing**: Podcast includes intro music, story stings, and outro music
+
+### Previous Features
+- **🔍 Real Web Search**: Agents use DuckDuckGo to find actual news (no more generated fake stories!)
 - **📋 Agent Log**: Debug and monitor your workflow with Activity Timeline, Artifacts Grid, and Raw LLM Outputs
 - **🛠️ Tool System**: Each agent has specialized tools (web search, file I/O, text analysis, validation)
-- **📅 Current Date Handling**: Fixed date issue - now uses actual current date instead of 2026
+- **📅 Current Date Handling**: Uses actual current date for news search
 
 ---
 
@@ -107,8 +115,10 @@ STEP 6: EDITOR - FINAL CHECK (Agent 2 - Same Editor)
          │
          ▼
 STEP 7: AUDIO PRODUCER (Agent 6)
-├── Generates narration with selected voice
-├── Mixes music cues at proper timestamps
+├── **Generates real TTS with Piper** (no more placeholder!)
+├── Splits script into segments
+├── Generates speech for each voice
+├── **Mixes music**: Intro → Story → Sting → Story → Outro
 ├── Produces final MP3 file
 └── 🎉 WORKFLOW COMPLETE
 ```
@@ -122,7 +132,7 @@ STEP 7: AUDIO PRODUCER (Agent 6)
 | 3 | **📝 Writer** | BBC Script Writer | Polishes script for broadcast, adds transitions |
 | 4 | **✅ Fact Checker** | Verification Specialist | Cross-references claims, generates report |
 | 5 | **🔄 Recovery Researcher** | Backup Researcher | Fixes fact-check failures (conditional) |
-| 6 | **🎙️ Audio Producer** | Audio Engineer | Generates MP3 with voice + music |
+| 6 | **🎙️ Audio Producer** | Audio Engineer | **Generates real TTS audio** with Piper + music mixing |
 
 ### The 11 Hard Requirements (Non-Negotiable)
 
@@ -226,8 +236,9 @@ When the `news_researcher` runs, you'll see in the Agent Log:
 ### Content Options
 - **Timeframes**: Daily (24h), Weekly (7d), Monthly (30d)
 - **Topics**: General News, Economy, Entertainment, Politics, Society, Sport, Technology, Crime
-- **Voices**: Multiple professional narrators (Adam, Josh, Rachel, etc.)
-- **Music**: Customizable intro/outro with style selection
+- **Voices**: 4 professional narrators with **live preview** (Adam, Bella, Josh, Rachel)
+- **Music**: 4 suites with **live preview** (Orchestral, Modern, BBC, Contemporary)
+- **Real TTS**: Piper TTS generates actual spoken audio (not placeholder)
 
 ### Real-Time Monitoring
 - **Agent Activity Log**: Live feed with timestamps and criteria pass/fail status
@@ -247,6 +258,9 @@ When the `news_researcher` runs, you'll see in the Agent Log:
 - **AutoGen v0.5** - Multi-agent orchestration with tool support
 - **Kimi API** - LLM for agent reasoning
 - **DuckDuckGo Search** - Web search for real news
+- **Piper TTS** - Local text-to-speech generation
+- **PyDub** - Audio mixing and processing
+- **ffmpeg** - Audio format conversion
 - **Pydantic** - Data validation and serialization
 
 ### Frontend (TypeScript/React)
@@ -309,6 +323,7 @@ When the `news_researcher` runs, you'll see in the Agent Log:
 - Python 3.10+
 - Node.js 18+
 - Kimi API key
+- ffmpeg (for audio processing)
 
 ### Installation
 
@@ -316,6 +331,20 @@ When the `news_researcher` runs, you'll see in the Agent Log:
 ```bash
 git clone https://github.com/atavist89-max/ai-newsroom.git
 cd ai-newsroom
+```
+
+1a. **Install ffmpeg** (required for audio processing)
+```bash
+# Ubuntu/Debian
+sudo apt-get install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Or download static build
+wget https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+tar -xf ffmpeg-release-amd64-static.tar.xz
+sudo cp ffmpeg-*-static/ffmpeg /usr/local/bin/
 ```
 
 2. **Set up Python environment**
@@ -488,6 +517,10 @@ ai-newsroom/
 │   │   └── loader.py      # Agent loader with tool registry
 │   ├── models/            # Pydantic models
 │   │   └── state.py       # Workflow state with artifacts & logs
+│   ├── services/          # Audio & TTS services
+│   │   ├── tts_service.py      # Piper TTS integration
+│   │   ├── audio_mixer.py      # Music mixing with PyDub
+│   │   └── podcast_audio_generator.py  # Full podcast generation
 │   ├── tools/             # Agent tools
 │   │   ├── web_search.py  # DuckDuckGo search & URL fetch
 │   │   ├── file_tools.py  # Read/write/list files
@@ -542,9 +575,10 @@ curl -X POST http://localhost:8000/workflow/start \
 - System will auto-loop to Writer for fixes
 - After max attempts, continues with warning (workflow never stops)
 
-**"No file to download"**
-- Audio Producer creates placeholder MP3
-- For real TTS, integrate ElevenLabs/OpenAI TTS API
+**"Audio generation failed"**
+- Check ffmpeg is installed: `ffmpeg -version`
+- Check voice models are downloaded in `python_server/models/piper/`
+- Check error message in Agent Log for details
 
 **Workflow stuck on "Working"**
 - Check `/tmp/python_server.log` for errors
@@ -553,9 +587,44 @@ curl -X POST http://localhost:8000/workflow/start \
 
 ---
 
+## Voice & Music Preview
+
+Before generating your podcast, you can preview voices and music:
+
+### Voice Preview
+Click the **play button** next to each voice to hear a sample:
+- **Adam**: Male, American accent
+- **Bella**: Female, American accent  
+- **Josh**: Male, British accent
+- **Rachel**: Female, American accent
+
+### Music Preview
+Click the **play button** next to each music component:
+- **Intro Music**: Opening theme
+- **Outro Music**: Closing theme
+- **Story Sting**: Transition between stories
+- **Block Transition**: Section separator
+
+Available styles:
+- **Orchestral A**: Dramatic orchestral with brass and strings
+- **Modern B**: Elegant orchestral with woodwinds
+- **Nordic C**: Clean, minimal electronic
+- **BBC Style**: Classic news transition sting
+- **Contemporary E**: Modern electronic with driving beat
+
+---
+
 ## Changelog
 
-### v2.3 - Never-Stopping Workflow (Current)
+### v3.0 - Real TTS Audio & Preview (Current)
+- **🎙️ Piper TTS Integration**: Real text-to-speech generation (no more placeholders!)
+- **🔊 Voice Preview**: Play voice samples before generating
+- **🎵 Music Preview**: Preview music components before selecting
+- **🎛️ Audio Mixing**: Full music suite mixing (intro → stories → stings → outro)
+- **🚫 Removed Fallbacks**: No synthetic data - errors are shown instead
+- **📦 New Dependencies**: piper-tts, pydub, ffmpeg
+
+### v2.3 - Never-Stopping Workflow
 - **Fixed**: Workflow no longer stops after max iteration attempts
 - **New**: After 3 Editor attempts or 2 Fact-Check corrections, continues with warnings
 - **New**: Separate counters for Editor attempts vs Fact-Check correction loops

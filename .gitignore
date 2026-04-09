@@ -28,3 +28,13 @@ build/
 .idea/
 *.swp
 *.swo
+
+# Piper TTS Models (large files)
+python_server/models/piper/*.onnx
+python_server/models/piper/*.onnx.json
+
+# Generated output files
+output/*.mp3
+
+# Test files
+test_workflow.py
